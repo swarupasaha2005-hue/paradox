@@ -565,6 +565,60 @@ impl CommunityPool {
         Ok(())
     }
 
+    pub fn reveal_bid(
+        env: Env,
+        round_id: u64,
+        participant: Address,
+        bid_amount: i128,
+        secret: BytesN<32>,
+    ) -> Result<(), Error> {
+        load_community(&env)?;
+        participant.require_auth();
+        let mut round = load_round(&env, round_id)?;
+        if round.status != RoundStatus::Reveal {
+            return Err(Error::RevealNotOpen);
+        }
+        let now = env.ledger().timestamp();
+        if now < round.commit_deadline {
+            return Err(Error::RevealNotOpen);
+        }
+        if now >= round.reveal_deadline {
+            return Err(Error::RevealClosed);
+        }
+        if !round.participants.contains(&participant) {
+            return Err(Error::NotParticipant);
+        }
+        let reveal_key = DataKey::Reveal(round_id, participant.clone());
+        if env.storage().persistent().has(&reveal_key) {
+            return Err(Error::RevealAlreadyExists);
+        }
+        let commit_key = DataKey::Commitment(round_id, participant.clone());
+        let stored: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&commit_key)
+            .ok_or(Error::CommitmentNotFound)?;
+        let request = request_for_participant(&env, &round, &participant)?;
+        if bid_amount <= 0 || bid_amount > request.maximum_amount {
+            return Err(Error::InvalidBid);
+        }
+        if bid_amount > round.available_capital {
+            return Err(Error::InsufficientPoolBalance);
+        }
+        if commitment::hash(&env, round_id, &participant, bid_amount, &secret) != stored {
+            return Err(Error::CommitmentMismatch);
+        }
+        let next_count = round
+            .valid_reveal_count
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+        env.storage().persistent().set(&reveal_key, &bid_amount);
+        bump_persistent(&env, &reveal_key);
+        round.valid_reveal_count = next_count;
+        save_round(&env, &round);
+        Ok(())
+    }
+
     pub fn get_commitment(
         env: Env,
         round_id: u64,
@@ -576,6 +630,19 @@ impl CommunityPool {
             .storage()
             .persistent()
             .get(&DataKey::Commitment(round_id, participant)))
+    }
+
+    pub fn get_reveal(
+        env: Env,
+        round_id: u64,
+        participant: Address,
+    ) -> Result<Option<i128>, Error> {
+        load_community(&env)?;
+        load_round(&env, round_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reveal(round_id, participant)))
     }
 
     pub fn get_community(env: Env) -> Result<Community, Error> {
