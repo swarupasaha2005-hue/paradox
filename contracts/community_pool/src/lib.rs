@@ -709,6 +709,75 @@ impl CommunityPool {
         Ok(())
     }
 
+    pub fn repay(
+        env: Env,
+        round_id: u64,
+        member_address: Address,
+        amount: i128,
+    ) -> Result<(), Error> {
+        let mut community = load_community(&env)?;
+        member_address.require_auth();
+        let mut round = load_round(&env, round_id)?;
+        if round.status != RoundStatus::Settled || round.winner.as_ref() != Some(&member_address) {
+            return Err(Error::InvalidRoundStatus);
+        }
+        if amount <= 0 || amount > round.outstanding_amount {
+            return Err(Error::InvalidRepayment);
+        }
+        let mut member = load_member(&env, &member_address).ok_or(Error::MemberNotFound)?;
+        if amount > member.outstanding_financing {
+            return Err(Error::InvalidRepayment);
+        }
+        let available = community
+            .available_pool
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        let outstanding = round
+            .outstanding_amount
+            .checked_sub(amount)
+            .ok_or(Error::Overflow)?;
+        let member_outstanding = member
+            .outstanding_financing
+            .checked_sub(amount)
+            .ok_or(Error::Overflow)?;
+        let (completed_rounds, completed_repayments) = if outstanding == 0 {
+            (
+                member
+                    .financing_rounds_completed
+                    .checked_add(1)
+                    .ok_or(Error::Overflow)?,
+                member
+                    .repayments_completed
+                    .checked_add(1)
+                    .ok_or(Error::Overflow)?,
+            )
+        } else {
+            (
+                member.financing_rounds_completed,
+                member.repayments_completed,
+            )
+        };
+        let destination = MuxedAddress::from(env.current_contract_address());
+        TokenClient::new(&env, &community.asset).transfer(&member_address, &destination, &amount);
+        community.available_pool = available;
+        round.outstanding_amount = outstanding;
+        member.outstanding_financing = member_outstanding;
+        member.financing_rounds_completed = completed_rounds;
+        member.repayments_completed = completed_repayments;
+        if outstanding == 0 {
+            let mut request = request_for_participant(&env, &round, &member_address)?;
+            if request.status != RequestStatus::Funded {
+                return Err(Error::InvalidRequestStatus);
+            }
+            request.status = RequestStatus::Repaid;
+            save_request(&env, &request);
+        }
+        save_member(&env, &member_address, &member);
+        save_round(&env, &round);
+        save_community(&env, &community);
+        Ok(())
+    }
+
     pub fn get_commitment(
         env: Env,
         round_id: u64,
