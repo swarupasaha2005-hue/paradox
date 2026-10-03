@@ -647,11 +647,99 @@ fn no_reveal_releases_pot_for_a_retry_of_the_same_cycle_round() {
 }
 
 #[test]
-fn ten_distinct_payouts_complete_cycle_and_contribution_obligations() {
+fn history_reads_are_structured_and_do_not_mutate_state() {
+    let f = AuctionFixture::new();
+    let before_member = f.client().get_member(&f.rahul);
+    let before_cycle = f.client().get_cycle_member(&f.cycle_id, &f.rahul);
+    let before_pool = f.client().get_pool_balance();
+    let history = f.client().get_financial_history(&f.rahul);
+    let cycle_history = f.client().get_cycle_history(&f.cycle_id, &f.rahul);
+    assert_eq!(history.contributions_completed, 1);
+    assert_eq!(history.total_contributed, 5_000 * UNIT);
+    assert_eq!(history.cycles_joined, 1);
+    assert_eq!(history.cycles_completed, 0);
+    assert_eq!(history.post_payout_contributions, 0);
+    assert_eq!(history.current_cycle_expected, 1);
+    assert_eq!(history.current_cycle_completed, 1);
+    assert_eq!(cycle_history.contributions_before_payout, 1);
+    assert_eq!(cycle_history.contributions_after_payout, 0);
+    assert!(!cycle_history.payout_received);
+    assert_eq!(cycle_history.payout_amount, 0);
+    assert_eq!(f.client().get_financial_history(&f.rahul), history);
+    assert_eq!(
+        f.client().get_cycle_history(&f.cycle_id, &f.rahul),
+        cycle_history
+    );
+    assert_eq!(f.client().get_member(&f.rahul), before_member);
+    assert_eq!(
+        f.client().get_cycle_member(&f.cycle_id, &f.rahul),
+        before_cycle
+    );
+    assert_eq!(f.client().get_pool_balance(), before_pool);
+    assert_eq!(
+        f.client().try_get_financial_history(&f.outsider),
+        Err(Ok(Error::MemberNotFound))
+    );
+    assert_eq!(
+        f.client().try_get_cycle_history(&f.cycle_id, &f.outsider),
+        Err(Ok(Error::NotCycleMember))
+    );
+}
+
+#[test]
+fn payout_and_discount_claim_update_history_once() {
     let f = AuctionFixture::finalized_with_rahul_winning();
+    let before = f.client().get_financial_history(&f.rahul);
+    assert_eq!(before.payouts_received, 0);
+    assert_eq!(before.discounts_earned, 0);
     f.client().settle(&f.round_id, &f.rahul);
+    let settled = f.client().get_financial_history(&f.rahul);
+    assert_eq!(settled.payouts_received, 1);
+    assert_eq!(settled.total_payouts_received, BID_RAHUL);
+    assert_eq!(settled.post_payout_contributions, 0);
+    assert_eq!(settled.discounts_earned, 700 * UNIT);
+    assert_eq!(settled.discounts_claimed, 0);
+    assert!(settled.current_cycle_payout_received);
+    let cycle = f.client().get_cycle_history(&f.cycle_id, &f.rahul);
+    assert_eq!(cycle.payout_round_number, Some(1));
+    assert_eq!(cycle.payout_amount, BID_RAHUL);
+    assert_eq!(cycle.contributions_before_payout, 1);
+    assert_eq!(cycle.contributions_after_payout, 0);
+    assert_eq!(cycle.post_payout_expected_to_date, 1);
+    assert_eq!(cycle.post_payout_required_total, 9);
+    assert_eq!(cycle.discounts_earned, 700 * UNIT);
+    f.client().claim_discount(&f.cycle_id, &f.rahul);
+    let claimed = f.client().get_financial_history(&f.rahul);
+    let claimed_cycle = f.client().get_cycle_history(&f.cycle_id, &f.rahul);
+    assert_eq!(claimed.discounts_earned, 700 * UNIT);
+    assert_eq!(claimed.discounts_claimed, 700 * UNIT);
+    assert_eq!(claimed_cycle.discounts_earned, 700 * UNIT);
+    assert_eq!(claimed_cycle.discounts_claimed, 700 * UNIT);
+    assert_eq!(claimed_cycle.claimable_discount, 0);
+    assert_eq!(
+        f.client().try_claim_discount(&f.cycle_id, &f.rahul),
+        Err(Ok(Error::NoDiscountToClaim))
+    );
+    assert_eq!(f.client().get_financial_history(&f.rahul), claimed);
+}
+
+#[test]
+fn ten_distinct_payouts_complete_cycle_and_contribution_obligations() {
+    let f = AuctionFixture::new();
+    let first_secret = f.secret(150);
+    f.commit(&f.riya, BID_RIYA, &first_secret);
+    f.open_reveal();
+    f.client()
+        .reveal_bid(&f.round_id, &f.riya, &BID_RIYA, &first_secret);
+    f.env.ledger().set_timestamp(200);
+    f.client().finalize_round(&f.round_id);
+    f.client().settle(&f.round_id, &f.riya);
     for index in 1..10u32 {
-        let recipient = f.members.get(index).unwrap();
+        let recipient = if index == 1 {
+            f.rahul.clone()
+        } else {
+            f.members.get(index).unwrap()
+        };
         for address in f.members.iter() {
             f.client().contribute(&address);
         }
@@ -693,9 +781,47 @@ fn ten_distinct_payouts_complete_cycle_and_contribution_obligations() {
             10
         );
         assert_eq!(f.client().get_member(&address).payouts_received, 1);
+        assert_eq!(
+            f.client().get_financial_history(&address).cycles_completed,
+            1
+        );
     }
+    let rahul = f.client().get_financial_history(&f.rahul);
+    assert_eq!(rahul.contributions_completed, 10);
+    assert_eq!(rahul.total_contributed, 50_000 * UNIT);
+    assert_eq!(rahul.cycles_joined, 1);
+    assert_eq!(rahul.cycles_completed, 1);
+    assert_eq!(rahul.payouts_received, 1);
+    assert_eq!(rahul.total_payouts_received, BID_RAHUL);
+    assert_eq!(rahul.post_payout_contributions, 8);
+    assert_eq!(rahul.discounts_earned, 6_700 * UNIT);
+    assert_eq!(rahul.discounts_claimed, 0);
+    let prior = f.client().get_cycle_history(&f.cycle_id, &f.rahul);
+    assert!(prior.cycle_complete);
+    assert!(prior.obligation_complete);
+    assert_eq!(prior.payout_round_number, Some(2));
+    assert_eq!(prior.payout_amount, BID_RAHUL);
+    assert_eq!(prior.contributions_before_payout, 2);
+    assert_eq!(prior.contributions_after_payout, 8);
+    assert_eq!(prior.post_payout_expected_to_date, 8);
+    assert_eq!(prior.post_payout_required_total, 8);
+    assert_eq!(prior.discounts_earned, 6_700 * UNIT);
     assert_eq!(
         f.client().try_contribute(&f.rahul),
         Err(Ok(Error::CycleComplete))
     );
+    let next_cycle = f.client().create_cycle(&f.admin, &f.members);
+    assert_eq!(next_cycle, 2);
+    let updated = f.client().get_financial_history(&f.rahul);
+    assert_eq!(updated.cycles_joined, 2);
+    assert_eq!(updated.cycles_completed, 1);
+    assert_eq!(updated.post_payout_contributions, 8);
+    assert_eq!(updated.total_payouts_received, BID_RAHUL);
+    assert_eq!(updated.discounts_earned, 6_700 * UNIT);
+    assert_eq!(updated.cycle_ids, vec![&f.env, 1, 2]);
+    assert_eq!(updated.current_cycle_id, Some(2));
+    assert_eq!(updated.current_cycle_expected, 1);
+    assert_eq!(updated.current_cycle_completed, 0);
+    assert!(!updated.current_cycle_payout_received);
+    assert_eq!(f.client().get_cycle_history(&f.cycle_id, &f.rahul), prior);
 }
