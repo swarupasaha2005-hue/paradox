@@ -45,10 +45,11 @@ For a production frontend process locally: `npm run start --workspace @paradox/w
 ## Current implementation status
 
 - Frontend foundation and placeholder routes: `/`, `/dashboard`, `/community`, `/request`, `/round/[id]`, `/history`.
-- Contract scaffold exposes only `version() -> 1`; no financial behavior is implemented.
-- Testnet configuration and wallet dependencies are present; wallet connection, signing, and RPC calls are not implemented.
-- Commit/reveal, eligibility, contributions, settlement, repayment, history, and demo seeding await implementation.
-- No protocol tests yet. Initialization is checked by lint, TypeScript, frontend production build, Rust formatting/checking, and the Stellar WASM build.
+- The contract now supports one community, authenticated membership and real token contributions, structured eligibility, capital requests, and bounded round creation. See [Step 2 contract notes](docs/step2-contract.md).
+- Rust and TypeScript commitment hashes share five fixed vectors. The reveal action will use the Rust implementation in Step 3.
+- A Testnet `version()` integration spike is deployed, but Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md).
+- Commit/reveal actions, winner selection, settlement, repayment, frontend protocol integration, and the final Testnet deployment remain for later stages.
+- Contract tests cover Step 2 state, real token balance changes, eligibility, requests, and rounds. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
 - shadcn/ui components and animation dependencies will be added only when needed during frontend implementation.
 
 Verification: the combined check script and HTTP smoke checks for all six routes passed locally. `npm audit --omit=dev` reports zero vulnerabilities. The full audit reports five high findings in the development-only ESLint dependency chain (`braces` / `micromatch` / `fast-glob`); no forced framework downgrade was applied.
