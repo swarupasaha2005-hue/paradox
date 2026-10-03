@@ -1,6 +1,7 @@
 import { STELLAR_TESTNET } from "@paradox/shared";
 
 export const STELLAR_CONFIG = {
+  network: process.env.NEXT_PUBLIC_STELLAR_NETWORK || "testnet",
   rpcUrl: process.env.NEXT_PUBLIC_STELLAR_RPC_URL || STELLAR_TESTNET.rpcUrl,
   horizonUrl: process.env.NEXT_PUBLIC_STELLAR_HORIZON_URL || STELLAR_TESTNET.horizonUrl,
   networkPassphrase:

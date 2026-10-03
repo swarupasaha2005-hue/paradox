@@ -16,6 +16,7 @@
     "typecheck": "npm run typecheck --workspace @paradox/web",
     "contract:build": "stellar contract build --locked",
     "test:commitment": "node --experimental-strip-types --test apps/web/src/lib/commitment.test.ts",
+    "test:frontend": "node --experimental-strip-types --test apps/web/src/lib/integration.test.ts",
     "check": "sh scripts/check.sh"
   }
 }
