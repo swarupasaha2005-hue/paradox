@@ -1,5 +1,4 @@
-// Change the visible product identity here when the final name is chosen.
 export const PRODUCT_CONFIG = {
-  name: "Community Finance Protocol",
-  description: "Community working capital with transparent eligibility and sealed-bid allocation.",
+  name: "Arth",
+  description: "Community capital, sealed bidding, and verifiable financial participation on Stellar.",
 } as const;
