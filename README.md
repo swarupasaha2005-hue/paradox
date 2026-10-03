@@ -45,11 +45,11 @@ For a production frontend process locally: `npm run start --workspace @paradox/w
 ## Current implementation status
 
 - Frontend foundation and placeholder routes: `/`, `/dashboard`, `/community`, `/request`, `/round/[id]`, `/history`.
-- The contract now supports one community, authenticated membership and real token contributions, structured eligibility, capital requests, and bounded round creation. See [Step 2 contract notes](docs/step2-contract.md).
-- Rust and TypeScript commitment hashes share five fixed vectors. The reveal action will use the Rust implementation in Step 3.
+- The contract supports one community, authenticated membership and real token contributions, structured eligibility, capital requests, and bounded round creation. See [Step 2 contract notes](docs/step2-contract.md).
+- Rust and TypeScript commitment hashes share five fixed vectors. The contract uses the same Rust hash to verify reveals.
 - A Testnet `version()` integration spike is deployed, but Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md).
-- Commit/reveal actions, winner selection, settlement, repayment, frontend protocol integration, and the final Testnet deployment remain for later stages.
-- Contract tests cover Step 2 state, real token balance changes, eligibility, requests, and rounds. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
+- Sealed-bid commitment and reveal, winner selection, settlement, and repayment are implemented on-chain. See [Step 3 auction notes](docs/step3-auction.md). Frontend protocol integration and final Testnet deployment remain for later stages.
+- Contract tests cover real token balance changes, eligibility, requests, rounds, adversarial bids, settlement, and repayment. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
 - shadcn/ui components and animation dependencies will be added only when needed during frontend implementation.
 
 Verification: the combined check script and HTTP smoke checks for all six routes passed locally. `npm audit --omit=dev` reports zero vulnerabilities. The full audit reports five high findings in the development-only ESLint dependency chain (`braces` / `micromatch` / `fast-glob`); no forced framework downgrade was applied.
