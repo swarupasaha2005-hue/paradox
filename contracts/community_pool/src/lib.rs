@@ -518,6 +518,38 @@ impl CommunityPool {
         Ok(id)
     }
 
+    pub fn commit_bid(
+        env: Env,
+        round_id: u64,
+        participant: Address,
+        commitment: BytesN<32>,
+    ) -> Result<(), Error> {
+        let community = load_community(&env)?;
+        participant.require_auth();
+        let round = load_round(&env, round_id)?;
+        if round.status != RoundStatus::Commit {
+            return Err(Error::InvalidRoundStatus);
+        }
+        if env.ledger().timestamp() >= round.commit_deadline {
+            return Err(Error::CommitClosed);
+        }
+        if !round.participants.contains(&participant) {
+            return Err(Error::NotParticipant);
+        }
+        let request = request_for_participant(&env, &round, &participant)?;
+        let member = load_member(&env, &participant);
+        if !eligibility(&community, member.as_ref(), request.maximum_amount).eligible {
+            return Err(Error::NotEligible);
+        }
+        let key = DataKey::Commitment(round_id, participant);
+        if env.storage().persistent().has(&key) {
+            return Err(Error::CommitmentAlreadyExists);
+        }
+        env.storage().persistent().set(&key, &commitment);
+        bump_persistent(&env, &key);
+        Ok(())
+    }
+
     pub fn get_community(env: Env) -> Result<Community, Error> {
         load_community(&env)
     }
