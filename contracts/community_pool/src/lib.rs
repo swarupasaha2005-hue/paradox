@@ -850,3 +850,6 @@ impl CommunityPool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod auction_tests;
