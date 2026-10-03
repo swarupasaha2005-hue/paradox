@@ -24,6 +24,7 @@ type Snapshot = {
   history: FinancialHistory | null;
   cycleHistory: CycleHistory | null;
   request: CapitalRequest | null;
+  pendingRequestCount: number;
   round: Round | null;
   ledgerTime: bigint;
 };
@@ -82,17 +83,17 @@ function friendlyError(error: unknown): string {
   return message.length > 220 ? "Transaction or contract read failed. Check the Testnet connection and try again." : message;
 }
 
-async function findCurrentRequest(community: Community, cycle: Cycle, wallet: string): Promise<CapitalRequest | null> {
+async function findCurrentRequests(community: Community, cycle: Cycle): Promise<CapitalRequest[]> {
+  const current: CapitalRequest[] = [];
   for (let last = community.request_counter; last > 0n;) {
     const first = last > 9n ? last - 9n : 1n;
     const ids = Array.from({ length: Number(last - first + 1n) }, (_, index) => last - BigInt(index));
     const requests = await Promise.all(ids.map((id) => arth.getRequest(id)));
-    const found = requests.find((request) => request.member === wallet && request.cycle_id === cycle.id && request.cycle_round_number === cycle.current_round_number && (request.status === "Pending" || request.status === "IncludedInRound"));
-    if (found) return found;
-    if (requests.some((request) => request.cycle_id < cycle.id || request.cycle_id === cycle.id && request.cycle_round_number < cycle.current_round_number)) return null;
+    current.push(...requests.filter((request) => request.cycle_id === cycle.id && request.cycle_round_number === cycle.current_round_number));
+    if (requests.some((request) => request.cycle_id < cycle.id || request.cycle_id === cycle.id && request.cycle_round_number < cycle.current_round_number)) break;
     last = first - 1n;
   }
-  return null;
+  return current;
 }
 
 export function ArthProvider({ children }: { children: React.ReactNode }) {
@@ -124,12 +125,13 @@ export function ArthProvider({ children }: { children: React.ReactNode }) {
       }
       const cycle = community.current_cycle_id === null ? null : await arth.getCycle(community.current_cycle_id);
       const included = Boolean(address && cycle?.members.includes(address));
-      const [cycleMember, cycleHistory, round, request] = await Promise.all([
+      const [cycleMember, cycleHistory, round, currentRequests] = await Promise.all([
         included ? arth.getCycleMember(cycle!.id, address!) : Promise.resolve(null),
         included ? arth.getCycleHistory(cycle!.id, address!) : Promise.resolve(null),
         cycle?.active_round_id != null ? arth.getRound(cycle.active_round_id) : cycle && community.round_counter > 0n ? arth.getRound(community.round_counter) : Promise.resolve(null),
-        included ? findCurrentRequest(community, cycle!, address!) : Promise.resolve(null),
+        cycle ? findCurrentRequests(community, cycle) : Promise.resolve([]),
       ]);
+      const request = currentRequests.find((item) => item.member === address && (item.status === "Pending" || item.status === "IncludedInRound")) ?? null;
       const currentRound = round?.cycle_id === cycle?.id ? round : null;
       const roundRequest = address && currentRound?.participants.includes(address)
         ? (await Promise.all(currentRound.request_ids.map((id) => arth.getRequest(id)))).find((item) => item.member === address) ?? null
@@ -140,7 +142,7 @@ export function ArthProvider({ children }: { children: React.ReactNode }) {
         address && currentRound?.participants.includes(address) && currentRound.status !== "Commit" ? arth.getReveal(currentRound.id, address) : Promise.resolve(null),
       ]);
       if (ticket === generation.current) {
-        setSnapshot({ community, pool, assetDecimals, cycleMembers, commitment, reveal, balance, isMember, member, eligibility, cycle, cycleMember, history, cycleHistory, round: currentRound, request: roundRequest ?? request, ledgerTime: BigInt(latest.closeTime) });
+        setSnapshot({ community, pool, assetDecimals, cycleMembers, commitment, reveal, balance, isMember, member, eligibility, cycle, cycleMember, history, cycleHistory, round: currentRound, request: roundRequest ?? request, pendingRequestCount: currentRequests.filter((item) => item.status === "Pending").length, ledgerTime: BigInt(latest.closeTime) });
         setLoadState("success");
       }
     } catch (error) {

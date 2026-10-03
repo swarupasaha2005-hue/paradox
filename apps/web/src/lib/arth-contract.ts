@@ -47,6 +47,14 @@ function enumName(value: unknown): string {
   throw new Error("Unexpected contract enum representation.");
 }
 
+function roundStatus(value: unknown): string {
+  const name = enumName(value);
+  if (name !== "Commit" && name !== "Reveal" && name !== "Finalized" && name !== "Settled") {
+    throw new Error(`Unsupported on-chain round phase: ${name}.`);
+  }
+  return name;
+}
+
 export const arth = {
   getCommunity: () => read<Community>(configuredContract(), "get_community"),
   getPoolBalance: () => read<PoolBalance>(configuredContract(), "get_pool_balance"),
@@ -58,7 +66,7 @@ export const arth = {
   getFinancialHistory: (wallet: string) => read<FinancialHistory>(configuredContract(), "get_financial_history", [address(wallet)]),
   getCycleHistory: (cycleId: bigint, wallet: string) => read<CycleHistory>(configuredContract(), "get_cycle_history", [u64(cycleId), address(wallet)]),
   getRequest: async (requestId: bigint) => { const request = await read<CapitalRequest>(configuredContract(), "get_request", [u64(requestId)]); return { ...request, status: enumName(request.status) }; },
-  getRound: async (roundId: bigint) => { const round = await read<Round>(configuredContract(), "get_round", [u64(roundId)]); return { ...round, status: enumName(round.status) }; },
+  getRound: async (roundId: bigint) => { const round = await read<Round>(configuredContract(), "get_round", [u64(roundId)]); return { ...round, status: roundStatus(round.status) }; },
   getCommitment: async (roundId: bigint, wallet: string) => {
     const result = await read<Uint8Array | null>(configuredContract(), "get_commitment", [u64(roundId), address(wallet)]);
     return result === null ? null : new Uint8Array(result);
