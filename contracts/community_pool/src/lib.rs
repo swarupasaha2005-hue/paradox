@@ -550,6 +550,34 @@ impl CommunityPool {
         Ok(())
     }
 
+    /// Permissionless phase transition after the commit deadline.
+    pub fn start_reveal(env: Env, round_id: u64) -> Result<(), Error> {
+        load_community(&env)?;
+        let mut round = load_round(&env, round_id)?;
+        if round.status != RoundStatus::Commit {
+            return Err(Error::InvalidRoundStatus);
+        }
+        if env.ledger().timestamp() < round.commit_deadline {
+            return Err(Error::CommitClosed);
+        }
+        round.status = RoundStatus::Reveal;
+        save_round(&env, &round);
+        Ok(())
+    }
+
+    pub fn get_commitment(
+        env: Env,
+        round_id: u64,
+        participant: Address,
+    ) -> Result<Option<BytesN<32>>, Error> {
+        load_community(&env)?;
+        load_round(&env, round_id)?;
+        Ok(env
+            .storage()
+            .persistent()
+            .get(&DataKey::Commitment(round_id, participant)))
+    }
+
     pub fn get_community(env: Env) -> Result<Community, Error> {
         load_community(&env)
     }
