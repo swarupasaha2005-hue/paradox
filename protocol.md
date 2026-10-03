@@ -22,6 +22,8 @@ The repository uses Next.js, TypeScript, npm workspaces, Stellar SDK, Freighter 
 
 Financial history determines **eligibility only**. It must never rank auction bids. Seeded names and businesses are frontend metadata; wallet addresses are the protocol identities.
 
+**Verifiable participation history:** Public reads expose objective wallet facts from actual contributions, payouts, discount credits and claims, and completed cycles. A member's aggregate history persists across cycles, and prior cycle records remain readable by cycle ID. These facts are not a traditional credit score, guarantee of creditworthiness, AI-generated risk rating, or promise of future payment. Another community or frontend can inspect them from the relevant CommunityPool contract ID; there is no cross-contract registry in the MVP. Without a defined calendar deadline, an unpaid contribution is not labeled as missed or defaulted.
+
 ## Protocol design
 
 Use the existing single `CommunityPool` Soroban contract and a configured [Stellar token-interface compatible asset](https://developers.stellar.org/docs/tokens/token-interface). Keep amounts as integer token units on-chain; convert to display units only in the UI. No backend or database is required.

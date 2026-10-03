@@ -49,6 +49,7 @@ For a production frontend process locally: `npm run start --workspace @paradox/w
 - Rust and TypeScript commitment hashes share five fixed vectors. The contract uses the same Rust hash to verify reveals.
 - A Testnet `version()` integration spike is deployed, but Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md).
 - Sealed-bid commitment and reveal, winner selection, discounted payout, and one-time discount claiming are implemented on-chain. The winning bid is the payout amount, not loan principal. See [cycle and auction notes](docs/step3-auction.md). Frontend protocol integration and final Testnet deployment remain for later stages.
+- Public [financial-history reads](docs/step4-history.md) expose objective contribution, payout, discount, and completed-cycle facts by wallet and cycle. They do not assign a credit score. The frontend has not yet been connected to these reads.
 - Contract tests cover token balances, cycle obligations, reserved pots, adversarial bids, payouts, discount conservation, and claims. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
 - shadcn/ui components and animation dependencies will be added only when needed during frontend implementation.
 
