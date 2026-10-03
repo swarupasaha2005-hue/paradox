@@ -25,3 +25,5 @@ For each settled round, the checked accounting identity is:
 `winner payout + (equal share × cycle members) + distributed remainder = round pot`.
 
 The corresponding token liabilities are `available_pool + reserved_pool + discount_liability`; direct unsolicited token transfers may make actual contract balance larger, but must never make it smaller than these accounted amounts. All amounts are integer token base units. The frontend must use the configured token's decimals for display conversion.
+
+Objective wallet participation facts and per-cycle progress are exposed through the [financial-history reads](step4-history.md).
