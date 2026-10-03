@@ -1,23 +1,22 @@
-export const XLM_DECIMALS = 7;
-export const XLM_SCALE = 10n ** BigInt(XLM_DECIMALS);
-
-export function parseXlm(value: string): bigint {
-  const trimmed = value.trim().replaceAll(",", "");
-  if (!/^(0|[1-9]\d*)(?:\.\d{1,7})?$/.test(trimmed)) throw new Error("Enter an XLM amount with at most 7 decimal places.");
-  const [whole, fraction = ""] = trimmed.split(".");
-  return BigInt(whole) * XLM_SCALE + BigInt(fraction.padEnd(XLM_DECIMALS, "0"));
+function scaleFor(decimals: number): bigint {
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) throw new Error("Invalid asset decimals.");
+  return 10n ** BigInt(decimals);
 }
 
-export function formatXlm(baseUnits: bigint | string, decimals = XLM_DECIMALS): string {
+export function parseXlm(value: string, decimals: number): bigint {
+  const trimmed = value.trim().replaceAll(",", "");
+  const pattern = decimals === 0 ? /^(0|[1-9]\d*)$/ : new RegExp(`^(0|[1-9]\\d*)(?:\\.(\\d{1,${decimals}}))?$`);
+  const match = trimmed.match(pattern);
+  if (!match) throw new Error(`Enter an XLM amount with at most ${decimals} decimal places.`);
+  return BigInt(match[1]) * scaleFor(decimals) + BigInt((match[2] ?? "").padEnd(decimals, "0"));
+}
+
+export function formatXlm(baseUnits: bigint | string, decimals: number): string {
+  const scale = scaleFor(decimals);
   const amount = BigInt(baseUnits);
   const negative = amount < 0n;
   const absolute = negative ? -amount : amount;
-  const whole = absolute / XLM_SCALE;
-  const fraction = (absolute % XLM_SCALE).toString().padStart(XLM_DECIMALS, "0");
-  const shown = fraction.slice(0, decimals).replace(/0+$/, "");
-  return `${negative ? "−" : ""}${whole.toLocaleString("en-US")}${shown ? `.${shown}` : ""} XLM`;
-}
-
-export function formatXlmExact(baseUnits: bigint | string): string {
-  return formatXlm(baseUnits, XLM_DECIMALS);
+  const whole = absolute / scale;
+  const fraction = (absolute % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return `${negative ? "−" : ""}${whole.toLocaleString("en-US")}${fraction ? `.${fraction}` : ""} XLM`;
 }

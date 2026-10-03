@@ -64,7 +64,8 @@ export const arth = {
     return result === null ? null : new Uint8Array(result);
   },
   getReveal: (roundId: bigint, wallet: string) => read<bigint | null>(configuredContract(), "get_reveal", [u64(roundId), address(wallet)]),
-  getXlmBalance: (wallet: string) => read<bigint>(new Contract(STELLAR_CONFIG.assetContractId), "balance", [address(wallet)]),
+  getXlmBalance: (wallet: string, assetId: string) => read<bigint>(new Contract(assetId), "balance", [address(wallet)]),
+  getAssetDecimals: (assetId: string) => read<number>(new Contract(assetId), "decimals"),
   getLatestLedger: () => server.getLatestLedger(),
 };
 

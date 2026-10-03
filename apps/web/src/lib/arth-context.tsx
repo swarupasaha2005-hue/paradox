@@ -11,6 +11,10 @@ type LoadState = "loading" | "success" | "error";
 type Snapshot = {
   community: Community;
   pool: PoolBalance;
+  assetDecimals: number;
+  cycleMembers: CycleMember[];
+  commitment: Uint8Array | null;
+  reveal: bigint | null;
   balance: bigint | null;
   isMember: boolean;
   member: Member | null;
@@ -111,9 +115,11 @@ export function ArthProvider({ children }: { children: React.ReactNode }) {
     setReadError(null);
     try {
       const [community, pool, latest] = await Promise.all([arth.getCommunity(), arth.getPoolBalance(), arth.getLatestLedger()]);
+      if (community.asset !== STELLAR_CONFIG.assetContractId) throw new Error("Configured asset differs from the community asset on-chain.");
+      const assetDecimals = await arth.getAssetDecimals(community.asset);
       let balance: bigint | null = null, isMember = false, member: Member | null = null, eligibility: Eligibility | null = null, history: FinancialHistory | null = null;
       if (address) {
-        [balance, isMember, eligibility] = await Promise.all([arth.getXlmBalance(address), arth.isMember(address), arth.getEligibility(address, community.financing_limit)]);
+        [balance, isMember, eligibility] = await Promise.all([arth.getXlmBalance(address, community.asset), arth.isMember(address), arth.getEligibility(address, community.financing_limit)]);
         if (isMember) [member, history] = await Promise.all([arth.getMember(address), arth.getFinancialHistory(address)]);
       }
       const cycle = community.current_cycle_id === null ? null : await arth.getCycle(community.current_cycle_id);
@@ -124,8 +130,17 @@ export function ArthProvider({ children }: { children: React.ReactNode }) {
         cycle?.active_round_id != null ? arth.getRound(cycle.active_round_id) : cycle && community.round_counter > 0n ? arth.getRound(community.round_counter) : Promise.resolve(null),
         included ? findCurrentRequest(community, cycle!, address!) : Promise.resolve(null),
       ]);
+      const currentRound = round?.cycle_id === cycle?.id ? round : null;
+      const roundRequest = address && currentRound?.participants.includes(address)
+        ? (await Promise.all(currentRound.request_ids.map((id) => arth.getRequest(id)))).find((item) => item.member === address) ?? null
+        : null;
+      const [cycleMembers, commitment, reveal] = await Promise.all([
+        cycle ? Promise.all(cycle.members.map((participant) => arth.getCycleMember(cycle.id, participant))) : Promise.resolve([]),
+        address && currentRound?.participants.includes(address) ? arth.getCommitment(currentRound.id, address) : Promise.resolve(null),
+        address && currentRound?.participants.includes(address) && currentRound.status !== "Commit" ? arth.getReveal(currentRound.id, address) : Promise.resolve(null),
+      ]);
       if (ticket === generation.current) {
-        setSnapshot({ community, pool, balance, isMember, member, eligibility, cycle, cycleMember, history, cycleHistory, round: round?.cycle_id === cycle?.id ? round : null, request, ledgerTime: BigInt(latest.closeTime) });
+        setSnapshot({ community, pool, assetDecimals, cycleMembers, commitment, reveal, balance, isMember, member, eligibility, cycle, cycleMember, history, cycleHistory, round: currentRound, request: roundRequest ?? request, ledgerTime: BigInt(latest.closeTime) });
         setLoadState("success");
       }
     } catch (error) {

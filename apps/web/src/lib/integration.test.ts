@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseXlm, formatXlmExact } from "./amount.ts";
+import { parseXlm, formatXlm } from "./amount.ts";
 import { computeCommitment } from "./commitment.ts";
 import { clearRevealedSecret, locallyMatchesCommitment, restoreBid, saveBid, sealedBidKey, toHex, type StoredBid } from "./sealed-bid.ts";
 
@@ -12,11 +12,14 @@ const memory = () => {
 };
 
 test("display XLM converts to exact integer base units and back", () => {
-  assert.equal(parseXlm("5,000"), 50_000_000_000n);
-  assert.equal(parseXlm("43000.1234567"), 430_001_234_567n);
-  assert.equal(formatXlmExact(parseXlm("43000.1234567")), "43,000.1234567 XLM");
-  assert.throws(() => parseXlm("1.12345678"));
-  assert.throws(() => parseXlm("-1"));
+  assert.equal(parseXlm("5,000", 7), 50_000_000_000n);
+  assert.equal(parseXlm("43000.1234567", 7), 430_001_234_567n);
+  assert.equal(formatXlm(parseXlm("43000.1234567", 7), 7), "43,000.1234567 XLM");
+  assert.throws(() => parseXlm("1.12345678", 7));
+  assert.throws(() => parseXlm("-1", 7));
+  assert.equal(parseXlm("8,600.123456", 6), 8_600_123_456n);
+  assert.equal(formatXlm(8_600_123_456n, 6), "8,600.123456 XLM");
+  assert.throws(() => parseXlm("1.1234567", 6));
 });
 
 test("stored bid is isolated by contract, wallet and round", async () => {
