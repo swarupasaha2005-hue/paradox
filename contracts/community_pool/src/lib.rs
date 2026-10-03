@@ -619,6 +619,44 @@ impl CommunityPool {
         Ok(())
     }
 
+    pub fn finalize_round(env: Env, round_id: u64) -> Result<(), Error> {
+        load_community(&env)?;
+        let mut round = load_round(&env, round_id)?;
+        if round.status != RoundStatus::Reveal {
+            return Err(Error::InvalidRoundStatus);
+        }
+        if env.ledger().timestamp() < round.reveal_deadline {
+            return Err(Error::FinalizationTooEarly);
+        }
+        let mut best_wallet: Option<Address> = None;
+        let mut best_amount: Option<i128> = None;
+        for participant in round.participants.iter() {
+            let bid: Option<i128> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Reveal(round_id, participant.clone()));
+            if let Some(amount) = bid {
+                let wins = match (&best_wallet, best_amount) {
+                    (Some(current_wallet), Some(current_amount)) => {
+                        amount < current_amount
+                            || (amount == current_amount
+                                && participant.to_string() < current_wallet.to_string())
+                    }
+                    _ => true,
+                };
+                if wins {
+                    best_wallet = Some(participant);
+                    best_amount = Some(amount);
+                }
+            }
+        }
+        round.winner = best_wallet;
+        round.winning_bid = best_amount;
+        round.status = RoundStatus::Finalized;
+        save_round(&env, &round);
+        Ok(())
+    }
+
     pub fn get_commitment(
         env: Env,
         round_id: u64,
