@@ -10,6 +10,6 @@ The community configuration, counters, and accounted available pool are stored t
 
 For display, read the configured token's `decimals()`. If it returns `7`, convert `50,000` display units to `50_000 * 10^7` integer token units before contract calls; convert returned integers back only for display. The tests use a test token with 7 decimals, ten contributions of `5_000 * 10^7` each, and verify a `50_000 * 10^7` pool. No floating-point amounts enter contract calls.
 
-Round request lists are capped at 10, with one request per participant in a round. Creating a round changes included requests from `Pending` to `IncludedInRound`, preventing the same request from entering another round. The stored phase is `Commit` with ledger-time commit and reveal deadlines. Bidding, reveal, finalization, settlement, and repayment are Step 3 work.
+Round request lists are capped at 10, with one request per participant in a round. Creating a round changes included requests from `Pending` to `IncludedInRound`, preventing the same request from entering another round. The stored phase is `Commit` with ledger-time commit and reveal deadlines. See [auction lifecycle](step3-auction.md) for subsequent transitions.
 
 The installed Soroban SDK 27 test utilities require `ed25519-dalek` 2.x; `Cargo.lock` pins compatible version 2.2.0 because unconstrained resolution selected incompatible 3.0.0 during Step 2 test compilation.
