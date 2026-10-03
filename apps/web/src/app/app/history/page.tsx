@@ -2,8 +2,8 @@ import { demo, formatAmount } from "@/lib/demo-state";
 
 const history = demo.history;
 export default function HistoryPage() {
-  return <div className="app-screen"><div className="app-page-heading"><div><span className="app-kicker"><i /> 04 / FINANCIAL HISTORY</span><h1>Participation,<br /><em>on record.</em></h1><p>Objective facts from contributions, payouts, discounts, and cycles.</p></div><span className="app-page-index">WALLET-BASED HISTORY / EXAMPLE</span></div>
-    <div className="app-history-record"><div className="app-history-top"><div><span className="app-panel-kicker">ARTH / PARTICIPATION HISTORY</span><h2>{demo.memberName}<span> / CYCLE 001</span></h2></div><span className="history-tag">COMPLETED CYCLE</span></div><div className="app-history-grid">{[
+  return <div className="app-screen"><div className="app-page-heading"><div><span className="app-kicker"><i /> 04 / FINANCIAL HISTORY</span><h1>Participation,<br /><em>on record.</em></h1><p>Objective facts from contributions, payouts, discounts, and cycles.</p></div><span className="app-page-index">FUTURE COMPLETED-CYCLE PREVIEW</span></div>
+    <div className="app-history-record"><div className="app-history-top"><div><span className="app-panel-kicker">ARTH / PARTICIPATION HISTORY</span><h2>{demo.memberName}<span> / CYCLE 001</span></h2></div><span className="history-tag">ILLUSTRATIVE COMPLETION</span></div><div className="app-history-grid">{[
       ["CONTRIBUTIONS COMPLETED",`${history.contributionsCompleted} / ${history.contributionsExpected}`],
       ["TOTAL CONTRIBUTED",formatAmount(history.totalContributed)],
       ["PAYOUTS RECEIVED",String(history.payoutsReceived)],
@@ -14,6 +14,7 @@ export default function HistoryPage() {
       ["CYCLES JOINED",String(history.cyclesJoined)],
       ["CYCLES COMPLETED",String(history.cyclesCompleted)],
     ].map(([label,value])=><div key={label}><span>{label}</span><strong>{value}</strong></div>)}</div></div>
+    <section className="discount-claim-preview"><div><span className="app-kicker">COMMUNITY DISCOUNT / EXAMPLE</span><h2>Your share<br /><em>stays claimable.</em></h2><p>Discount credits are recorded for cycle members, including the winner. This completed-cycle example has not claimed its credits.</p></div><div><div className="bid-detail"><span>EARNED</span><strong>{formatAmount(history.discountsEarned)}</strong></div><div className="bid-detail"><span>CLAIMED</span><strong>{formatAmount(history.discountsClaimed)}</strong></div><div className="bid-detail"><span>CURRENTLY CLAIMABLE</span><strong>{formatAmount(history.discountsEarned-history.discountsClaimed)}</strong></div><button className="button button--dark" type="button" disabled>CLAIM DISCOUNT <span>↗</span></button><small>Interface preview only. No token transfer or transaction occurs.</small></div></section>
     <div className="history-explainer"><span className="app-kicker">VERIFIABLE PARTICIPATION</span><h2>Facts, not a score.</h2><p>Arth’s history shows actual protocol activity. It is not a traditional credit score, a risk rating, or a promise of future performance. Missed contributions are not shown because the current protocol does not define calendar-based missed contribution enforcement.</p></div>
   </div>;
 }
