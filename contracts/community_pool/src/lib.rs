@@ -83,8 +83,13 @@ pub struct Member {
     pub contributions_completed: u32,
     pub contributions_missed: u32,
     pub total_contributed: i128,
+    pub cycles_joined: u32,
+    pub cycles_completed: u32,
+    pub cycle_ids: Vec<u64>,
     pub payouts_received: u32,
     pub total_payouts_received: i128,
+    pub post_payout_contributions: u32,
+    pub discounts_earned: i128,
     pub discounts_claimed: i128,
     pub defaults: u32,
     pub unresolved_default: bool,
@@ -112,7 +117,10 @@ pub struct CycleMember {
     pub contributions_before_payout: u32,
     pub contributions_after_payout: u32,
     pub obligation_complete: bool,
+    pub payout_amount: i128,
+    pub payout_round_number: Option<u32>,
     pub claimable_discount: i128,
+    pub discounts_claimed: i128,
 }
 
 #[contracttype]
@@ -462,8 +470,13 @@ impl CommunityPool {
                 contributions_completed: 0,
                 contributions_missed: 0,
                 total_contributed: 0,
+                cycles_joined: 0,
+                cycles_completed: 0,
+                cycle_ids: Vec::new(&env),
                 payouts_received: 0,
                 total_payouts_received: 0,
+                post_payout_contributions: 0,
+                discounts_earned: 0,
                 discounts_claimed: 0,
                 defaults: 0,
                 unresolved_default: false,
@@ -501,6 +514,13 @@ impl CommunityPool {
             .checked_add(1)
             .ok_or(Error::Overflow)?;
         for address in members.iter() {
+            let mut history = load_member(&env, &address).ok_or(Error::MemberNotFound)?;
+            history.cycles_joined = history
+                .cycles_joined
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
+            history.cycle_ids.push_back(id);
+            save_member(&env, &address, &history);
             save_cycle_member(
                 &env,
                 &CycleMember {
@@ -512,7 +532,10 @@ impl CommunityPool {
                     contributions_before_payout: 0,
                     contributions_after_payout: 0,
                     obligation_complete: false,
+                    payout_amount: 0,
+                    payout_round_number: None,
                     claimable_discount: 0,
+                    discounts_claimed: 0,
                 },
             );
         }
@@ -579,6 +602,10 @@ impl CommunityPool {
         if cycle_state.payout_received {
             cycle_state.contributions_after_payout = cycle_state
                 .contributions_after_payout
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
+            state.post_payout_contributions = state
+                .post_payout_contributions
                 .checked_add(1)
                 .ok_or(Error::Overflow)?;
         } else {
