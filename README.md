@@ -25,7 +25,7 @@ cp apps/web/.env.example apps/web/.env.local
 npm run dev
 ```
 
-Open http://localhost:3000. The contract and asset IDs can remain empty for placeholder pages. Public environment variables must never contain wallet private keys or bid secrets.
+Open http://localhost:3000. The example environment points to the initialized [Testnet CommunityPool](docs/testnet-deployment.md). Public environment variables must never contain wallet private keys or bid secrets.
 
 ```sh
 npm run lint
@@ -40,15 +40,15 @@ npm run check
 
 Built contract: `target/wasm32v1-none/release/community_pool.wasm`.
 
-For a production frontend process locally: `npm run start --workspace @paradox/web` after building. Deployment is deferred: deploy the implemented contract to Stellar Testnet, then set its contract ID and asset contract ID before building the frontend. No contract has been deployed by this initialization.
+For a production frontend process locally: `npm run start --workspace @paradox/web` after building. The full contract is deployed and initialized on Testnet; frontend wallet and contract integration remains a separate step.
 
 ## Current implementation status
 
 - Frontend foundation and placeholder routes: `/`, `/dashboard`, `/community`, `/request`, `/round/[id]`, `/history`.
 - The contract supports one community, authenticated membership, fixed member cycles, real token contributions, structured eligibility, payout requests, and reserved round pots. See [contract state notes](docs/step2-contract.md).
 - Rust and TypeScript commitment hashes share five fixed vectors. The contract uses the same Rust hash to verify reveals.
-- A Testnet `version()` integration spike is deployed, but Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md).
-- Sealed-bid commitment and reveal, winner selection, discounted payout, and one-time discount claiming are implemented on-chain. The winning bid is the payout amount, not loan principal. See [cycle and auction notes](docs/step3-auction.md). Frontend protocol integration and final Testnet deployment remain for later stages.
+- The Step 1 Testnet `version()` integration spike is obsolete; Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md) and the [current Testnet deployment](docs/testnet-deployment.md).
+- Sealed-bid commitment and reveal, winner selection, discounted payout, and one-time discount claiming are implemented on-chain. The winning bid is the payout amount, not loan principal. See [cycle and auction notes](docs/step3-auction.md). Frontend protocol integration remains for a later stage.
 - Public [financial-history reads](docs/step4-history.md) expose objective contribution, payout, discount, and completed-cycle facts by wallet and cycle. They do not assign a credit score. The frontend has not yet been connected to these reads.
 - Contract tests cover token balances, cycle obligations, reserved pots, adversarial bids, payouts, discount conservation, and claims. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
 - shadcn/ui components and animation dependencies will be added only when needed during frontend implementation.

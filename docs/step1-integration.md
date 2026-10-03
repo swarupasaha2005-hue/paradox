@@ -19,7 +19,7 @@ Run `cargo test --workspace --locked` and `npm run test:commitment` to check bot
 
 ## Testnet spike
 
-The Step 1 `version()`-only contract was deployed solely to exercise the integration path. It will be replaced by the protocol contract in the deployment stage.
+The Step 1 `version()`-only contract was deployed solely to exercise the integration path. **It is obsolete and must not be used for Arth protocol calls.** The full CommunityPool deployment is recorded in [Testnet deployment](testnet-deployment.md).
 
 - Contract ID: `CCMNYWLCQBDU4FYOXXQXY3EL6UFDGZMHC4XR4JVDQ3ZVBLK6KRQJW6O4`
 - WASM hash: `444318947963ffbdb20592628bd0e3eba38929175d740ecff686573fcb123d6b`
