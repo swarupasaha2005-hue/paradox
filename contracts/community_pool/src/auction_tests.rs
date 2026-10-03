@@ -15,10 +15,13 @@ const BID_AMAN: i128 = 45_000 * UNIT;
 struct AuctionFixture {
     env: Env,
     contract: Address,
+    admin: Address,
     rahul: Address,
     riya: Address,
     aman: Address,
     outsider: Address,
+    cycle_id: u64,
+    members: Vec<Address>,
     round_id: u64,
 }
 
@@ -39,12 +42,17 @@ impl AuctionFixture {
         let contribution = 5_000 * UNIT;
         client.create_community(&admin, &asset, &contribution, &3, &(50_000 * UNIT));
         let token = StellarAssetClient::new(&env, &asset);
-        for (participant, count) in [(&rahul, 4), (&riya, 3), (&aman, 3)] {
-            token.mint(participant, &(100_000 * UNIT));
-            client.join(participant);
-            for _ in 0..count {
-                client.contribute(participant);
-            }
+        let mut members = vec![&env, rahul.clone(), riya.clone(), aman.clone()];
+        for _ in 3..10 {
+            members.push_back(Address::generate(&env));
+        }
+        for participant in members.iter() {
+            token.mint(&participant, &(100_000 * UNIT));
+            client.join(&participant);
+        }
+        let cycle_id = client.create_cycle(&admin, &members);
+        for participant in members.iter() {
+            client.contribute(&participant);
         }
         let purpose = BytesN::from_array(&env, &[7; 32]);
         let rahul_request = client.request_capital(&rahul, &BID_RAHUL, &purpose);
@@ -59,10 +67,13 @@ impl AuctionFixture {
         Self {
             env,
             contract,
+            admin,
             rahul,
             riya,
             aman,
             outsider,
+            cycle_id,
+            members,
             round_id,
         }
     }
@@ -364,7 +375,7 @@ fn no_valid_reveal_finalizes_without_a_winner() {
     assert!(round.winning_bid.is_none());
     assert_eq!(f.client().get_reveal(&f.round_id, &f.rahul), None);
     assert_eq!(
-        f.client().try_settle(&f.round_id, &f.rahul, &300),
+        f.client().try_settle(&f.round_id, &f.rahul),
         Err(Ok(Error::NoWinner))
     );
 }
@@ -408,88 +419,199 @@ fn participant_must_remain_eligible_to_commit() {
 }
 
 #[test]
-fn reveal_cannot_exceed_round_capital_snapshot() {
+fn one_round_reserves_its_pot_and_cannot_be_reused() {
     let f = AuctionFixture::new();
-    let community = f.client().get_community();
-    let token = soroban_sdk::token::TokenClient::new(&f.env, &community.asset);
-    token.transfer(
-        &f.contract,
-        &MuxedAddress::from(&f.outsider),
-        &(20_000 * UNIT),
-    );
-    let purpose = BytesN::from_array(&f.env, &[8; 32]);
-    let request = f.client().request_capital(&f.rahul, &BID_RAHUL, &purpose);
-    let second_round =
-        f.client()
-            .create_round(&community.admin, &vec![&f.env, request], &100, &200);
-    assert_eq!(
-        f.client().get_round(&second_round).available_capital,
-        30_000 * UNIT
-    );
-    let secret = f.secret(112);
-    let hash = commitment::hash(&f.env, second_round, &f.rahul, BID_RAHUL, &secret);
-    f.client().commit_bid(&second_round, &f.rahul, &hash);
-    f.env.ledger().set_timestamp(100);
-    f.client().start_reveal(&second_round);
+    let balance = f.client().get_pool_balance();
+    assert_eq!(balance.available_pool, 0);
+    assert_eq!(balance.reserved_pool, 50_000 * UNIT);
+    assert_eq!(balance.discount_liability, 0);
+    assert_eq!(balance.token_balance, 50_000 * UNIT);
     assert_eq!(
         f.client()
-            .try_reveal_bid(&second_round, &f.rahul, &BID_RAHUL, &secret),
-        Err(Ok(Error::InsufficientPoolBalance))
+            .try_create_round(&f.admin, &vec![&f.env, 1], &100, &200),
+        Err(Ok(Error::RoundAlreadyActive))
     );
-    assert_eq!(f.client().get_reveal(&second_round, &f.rahul), None);
+    assert_eq!(f.client().get_round(&f.round_id).pot, 50_000 * UNIT);
 }
 
 #[test]
-fn settlement_transfers_once_and_full_repayment_restores_pool() {
+fn settlement_pays_discounted_payout_and_credits_all_ten_members() {
     let f = AuctionFixture::finalized_with_rahul_winning();
     let client = f.client();
     let asset = client.get_community().asset;
     let token = soroban_sdk::token::TokenClient::new(&f.env, &asset);
     let rahul_before = token.balance(&f.rahul);
-    client.settle(&f.round_id, &f.rahul, &300);
+    client.settle(&f.round_id, &f.rahul);
     assert_eq!(token.balance(&f.rahul), rahul_before + BID_RAHUL);
     assert_eq!(token.balance(&f.contract), 7_000 * UNIT);
-    assert_eq!(client.get_pool_balance().available_pool, 7_000 * UNIT);
+    let balance = client.get_pool_balance();
+    assert_eq!(balance.available_pool, 0);
+    assert_eq!(balance.reserved_pool, 0);
+    assert_eq!(balance.discount_liability, 7_000 * UNIT);
+    assert_eq!(balance.token_balance, balance.discount_liability);
     let round = client.get_round(&f.round_id);
     assert_eq!(round.status, RoundStatus::Settled);
-    assert!(round.settled);
-    assert_eq!(round.outstanding_amount, BID_RAHUL);
-    assert_eq!(round.due_date, Some(300));
-    assert_eq!(client.get_member(&f.rahul).outstanding_financing, BID_RAHUL);
-    assert_eq!(client.get_request(&1).status, RequestStatus::Funded);
+    assert_eq!(round.auction_discount, 7_000 * UNIT);
+    assert_eq!(round.discount_per_member, 700 * UNIT);
+    assert_eq!(round.discount_remainder, 0);
     assert_eq!(
-        client.try_settle(&f.round_id, &f.rahul, &300),
-        Err(Ok(Error::AlreadySettled))
+        round.winning_bid.unwrap() + round.auction_discount,
+        round.pot
     );
-
-    client.repay(&f.round_id, &f.rahul, &BID_RAHUL);
-    assert_eq!(token.balance(&f.rahul), rahul_before);
-    assert_eq!(token.balance(&f.contract), 50_000 * UNIT);
-    assert_eq!(client.get_pool_balance().available_pool, 50_000 * UNIT);
-    assert_eq!(client.get_round(&f.round_id).outstanding_amount, 0);
-    let member = client.get_member(&f.rahul);
-    assert_eq!(member.outstanding_financing, 0);
-    assert_eq!(member.financing_rounds_completed, 1);
-    assert_eq!(member.repayments_completed, 1);
-    assert_eq!(member.repayments_missed, 0);
-    assert_eq!(client.get_request(&1).status, RequestStatus::Repaid);
+    assert_eq!(client.get_request(&1).status, RequestStatus::PaidOut);
+    assert_eq!(client.get_request(&2).status, RequestStatus::NotSelected);
     assert_eq!(
-        client.try_repay(&f.round_id, &f.rahul, &1),
-        Err(Ok(Error::InvalidRepayment))
+        client.get_member(&f.rahul).total_payouts_received,
+        BID_RAHUL
+    );
+    assert_eq!(client.get_member(&f.rahul).payouts_received, 1);
+    let mut sum = 0;
+    for address in f.members.iter() {
+        let state = client.get_cycle_member(&f.cycle_id, &address);
+        assert_eq!(state.claimable_discount, 700 * UNIT);
+        sum += state.claimable_discount;
+    }
+    assert_eq!(sum, round.auction_discount);
+    assert!(
+        client
+            .get_cycle_member(&f.cycle_id, &f.rahul)
+            .payout_received
+    );
+    assert_eq!(
+        client.try_settle(&f.round_id, &f.rahul),
+        Err(Ok(Error::AlreadySettled))
     );
 }
 
 #[test]
-fn invalid_winner_deadline_and_insufficient_pool_block_settlement() {
+fn winner_continues_contributing_and_cannot_win_twice_in_cycle() {
+    let f = AuctionFixture::finalized_with_rahul_winning();
+    let client = f.client();
+    client.settle(&f.round_id, &f.rahul);
+    let before = client.get_cycle_member(&f.cycle_id, &f.rahul);
+    assert_eq!(before.expected_contributions, 2);
+    assert_eq!(before.completed_contributions, 1);
+    assert_eq!(before.contributions_before_payout, 1);
+    assert_eq!(before.contributions_after_payout, 0);
+    assert!(!before.obligation_complete);
+    assert_eq!(
+        client.try_request_capital(&f.rahul, &BID_RAHUL, &BytesN::from_array(&f.env, &[9; 32])),
+        Err(Ok(Error::NotEligible))
+    );
+    client.contribute(&f.rahul);
+    let after = client.get_cycle_member(&f.cycle_id, &f.rahul);
+    assert_eq!(after.completed_contributions, 2);
+    assert_eq!(after.contributions_after_payout, 1);
+    assert!(
+        !client
+            .get_eligibility(&f.rahul, &BID_RAHUL)
+            .payout_not_received
+    );
+    assert_eq!(
+        client.try_contribute(&f.rahul),
+        Err(Ok(Error::ContributionAlreadyMade))
+    );
+    for address in f.members.iter() {
+        if address != f.rahul {
+            client.contribute(&address);
+        }
+    }
+    let riya_request =
+        client.request_capital(&f.riya, &BID_RIYA, &BytesN::from_array(&f.env, &[10; 32]));
+    let aman_request =
+        client.request_capital(&f.aman, &BID_AMAN, &BytesN::from_array(&f.env, &[11; 32]));
+    let next_round = client.create_round(
+        &f.admin,
+        &vec![&f.env, riya_request, aman_request],
+        &300,
+        &400,
+    );
+    assert_eq!(client.get_round(&next_round).cycle_round_number, 2);
+    assert_eq!(client.get_round(&next_round).pot, 50_000 * UNIT);
+    assert_eq!(client.get_pool_balance().reserved_pool, 50_000 * UNIT);
+    assert_eq!(client.get_pool_balance().discount_liability, 7_000 * UNIT);
+    assert_eq!(client.get_pool_balance().token_balance, 57_000 * UNIT);
+    let secret = f.secret(140);
+    let hash = commitment::hash(&f.env, next_round, &f.riya, BID_RIYA, &secret);
+    client.commit_bid(&next_round, &f.riya, &hash);
+    assert_eq!(
+        client.try_commit_bid(&next_round, &f.rahul, &hash),
+        Err(Ok(Error::NotParticipant))
+    );
+}
+
+#[test]
+fn discount_remainder_uses_ascending_wallet_order_and_claim_is_once() {
+    let f = AuctionFixture::new();
+    let bid = BID_RAHUL - 3;
+    let secret = f.secret(141);
+    f.commit(&f.rahul, bid, &secret);
+    f.open_reveal();
+    f.client().reveal_bid(&f.round_id, &f.rahul, &bid, &secret);
+    f.env.ledger().set_timestamp(200);
+    f.client().finalize_round(&f.round_id);
+    f.client().settle(&f.round_id, &f.rahul);
+    let round = f.client().get_round(&f.round_id);
+    assert_eq!(round.auction_discount, 7_000 * UNIT + 3);
+    assert_eq!(round.discount_remainder, 3);
+    let mut total = 0;
+    for address in f.members.iter() {
+        let rank = f
+            .members
+            .iter()
+            .filter(|other| other.to_string() < address.to_string())
+            .count();
+        let expected = 700 * UNIT + if rank < 3 { 1 } else { 0 };
+        let credit = f
+            .client()
+            .get_cycle_member(&f.cycle_id, &address)
+            .claimable_discount;
+        assert_eq!(credit, expected);
+        total += credit;
+    }
+    assert_eq!(bid + total, round.pot);
+    let claimant = f.members.get(0).unwrap();
+    let balance_before = f.client().get_pool_balance().token_balance;
+    let amount = f
+        .client()
+        .get_cycle_member(&f.cycle_id, &claimant)
+        .claimable_discount;
+    f.env.set_auths(&[]);
+    assert!(f
+        .client()
+        .try_claim_discount(&f.cycle_id, &claimant)
+        .is_err());
+    f.env.mock_all_auths();
+    assert_eq!(f.client().claim_discount(&f.cycle_id, &claimant), amount);
+    assert_eq!(
+        f.client().get_pool_balance().token_balance,
+        balance_before - amount
+    );
+    assert_eq!(
+        f.client().get_pool_balance().discount_liability,
+        total - amount
+    );
+    assert_eq!(
+        f.client().try_claim_discount(&f.cycle_id, &claimant),
+        Err(Ok(Error::NoDiscountToClaim))
+    );
+    for address in f.members.iter() {
+        if address != claimant {
+            f.client().claim_discount(&f.cycle_id, &address);
+        }
+    }
+    let balance = f.client().get_pool_balance();
+    assert_eq!(balance.token_balance, 0);
+    assert_eq!(balance.discount_liability, 0);
+}
+
+#[test]
+fn invalid_winner_and_missing_reserved_tokens_block_settlement() {
     let f = AuctionFixture::finalized_with_rahul_winning();
     let client = f.client();
     assert_eq!(
-        client.try_settle(&f.round_id, &f.riya, &300),
+        client.try_settle(&f.round_id, &f.riya),
         Err(Ok(Error::NoWinner))
-    );
-    assert_eq!(
-        client.try_settle(&f.round_id, &f.rahul, &200),
-        Err(Ok(Error::InvalidDeadline))
     );
     let asset = client.get_community().asset;
     let token = soroban_sdk::token::TokenClient::new(&f.env, &asset);
@@ -499,40 +621,81 @@ fn invalid_winner_deadline_and_insufficient_pool_block_settlement() {
         &(8_000 * UNIT),
     );
     assert_eq!(
-        client.try_settle(&f.round_id, &f.rahul, &300),
+        client.try_settle(&f.round_id, &f.rahul),
         Err(Ok(Error::InsufficientPoolBalance))
     );
     assert_eq!(client.get_round(&f.round_id).status, RoundStatus::Finalized);
-    assert_eq!(client.get_community().available_pool, 50_000 * UNIT);
-    assert_eq!(client.get_member(&f.rahul).outstanding_financing, 0);
+    assert_eq!(client.get_community().reserved_pool, 50_000 * UNIT);
 }
 
 #[test]
-fn unauthorized_or_excess_repayment_fails_and_partial_repayment_tracks_balance() {
+fn no_reveal_releases_pot_for_a_retry_of_the_same_cycle_round() {
+    let f = AuctionFixture::new();
+    f.open_reveal();
+    f.env.ledger().set_timestamp(200);
+    f.client().finalize_round(&f.round_id);
+    assert_eq!(f.client().get_pool_balance().available_pool, 50_000 * UNIT);
+    assert_eq!(f.client().get_pool_balance().reserved_pool, 0);
+    assert_eq!(f.client().get_cycle(&f.cycle_id).current_round_number, 1);
+    assert_eq!(f.client().get_cycle(&f.cycle_id).active_round_id, None);
+    assert_eq!(f.client().get_request(&1).status, RequestStatus::Pending);
+    let retry = f
+        .client()
+        .create_round(&f.admin, &vec![&f.env, 1, 2, 3], &300, &400);
+    assert_eq!(f.client().get_round(&retry).pot, 50_000 * UNIT);
+    assert_eq!(f.client().get_pool_balance().reserved_pool, 50_000 * UNIT);
+}
+
+#[test]
+fn ten_distinct_payouts_complete_cycle_and_contribution_obligations() {
     let f = AuctionFixture::finalized_with_rahul_winning();
-    let client = f.client();
-    client.settle(&f.round_id, &f.rahul, &300);
-    f.env.set_auths(&[]);
-    assert!(client
-        .try_repay(&f.round_id, &f.rahul, &(1_000 * UNIT))
-        .is_err());
-    f.env.mock_all_auths();
+    f.client().settle(&f.round_id, &f.rahul);
+    for index in 1..10u32 {
+        let recipient = f.members.get(index).unwrap();
+        for address in f.members.iter() {
+            f.client().contribute(&address);
+        }
+        let request = f.client().request_capital(
+            &recipient,
+            &BID_RAHUL,
+            &BytesN::from_array(&f.env, &[index as u8; 32]),
+        );
+        let commit_deadline = 200 + u64::from(index) * 100;
+        let reveal_deadline = commit_deadline + 50;
+        let round_id = f.client().create_round(
+            &f.admin,
+            &vec![&f.env, request],
+            &commit_deadline,
+            &reveal_deadline,
+        );
+        let secret = f.secret(index as u8);
+        let hash = commitment::hash(&f.env, round_id, &recipient, BID_RAHUL, &secret);
+        f.client().commit_bid(&round_id, &recipient, &hash);
+        f.env.ledger().set_timestamp(commit_deadline);
+        f.client().start_reveal(&round_id);
+        f.client()
+            .reveal_bid(&round_id, &recipient, &BID_RAHUL, &secret);
+        f.env.ledger().set_timestamp(reveal_deadline);
+        f.client().finalize_round(&round_id);
+        f.client().settle(&round_id, &recipient);
+    }
+    let cycle = f.client().get_cycle(&f.cycle_id);
+    assert!(cycle.complete);
+    assert_eq!(cycle.payouts_completed, 10);
+    for address in f.members.iter() {
+        let state = f.client().get_cycle_member(&f.cycle_id, &address);
+        assert!(state.payout_received);
+        assert!(state.obligation_complete);
+        assert_eq!(state.expected_contributions, 10);
+        assert_eq!(state.completed_contributions, 10);
+        assert_eq!(
+            state.contributions_before_payout + state.contributions_after_payout,
+            10
+        );
+        assert_eq!(f.client().get_member(&address).payouts_received, 1);
+    }
     assert_eq!(
-        client.try_repay(&f.round_id, &f.rahul, &(BID_RAHUL + 1)),
-        Err(Ok(Error::InvalidRepayment))
+        f.client().try_contribute(&f.rahul),
+        Err(Ok(Error::CycleComplete))
     );
-    assert_eq!(
-        client.try_repay(&f.round_id, &f.riya, &(1_000 * UNIT)),
-        Err(Ok(Error::InvalidRoundStatus))
-    );
-    client.repay(&f.round_id, &f.rahul, &(3_000 * UNIT));
-    assert_eq!(
-        client.get_round(&f.round_id).outstanding_amount,
-        40_000 * UNIT
-    );
-    assert_eq!(client.get_member(&f.rahul).repayments_completed, 0);
-    assert_eq!(client.get_request(&1).status, RequestStatus::Funded);
-    client.repay(&f.round_id, &f.rahul, &(40_000 * UNIT));
-    assert_eq!(client.get_member(&f.rahul).repayments_completed, 1);
-    assert_eq!(client.get_request(&1).status, RequestStatus::Repaid);
 }

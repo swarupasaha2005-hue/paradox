@@ -1,18 +1,9 @@
-# MVP implementation boundary
+# Arth MVP boundary
 
-This commit initializes tooling and placeholder routes only.
+The demo uses one Soroban community contract and a fixed member cycle. Members make real fixed token contributions each round; the current round's contributions form a reserved pot. Eligible members submit sealed bids for the discounted payout they would accept in exchange for receiving their turn. The lowest valid revealed bid wins, with deterministic ties.
 
-Next implementation order:
-1. Community/member state and authenticated token contributions.
-2. Transparent eligibility and capital requests.
-3. Commit/reveal with canonical Soroban encoding binding round, wallet, amount, and secret.
-4. Lowest valid bid allocation, deterministic ties, and one-time settlement.
-5. Repayment, explicit default transition, and financial history.
-6. Testnet deployment and Freighter transaction integration.
-7. End-to-end demo and frontend polish.
+Acceptance demo: 10 members each contribute 5,000 units, making a 50,000-unit round pot. Rahul, Riya, and Aman reveal 43,000, 46,000, and 45,000 respectively. Rahul receives 43,000 once. The 7,000 difference becomes equal claimable discount credits of 700 for all 10 members, including Rahul. Rahul has no separate 43,000 loan debt and continues contributing 5,000 in each remaining cycle round. He cannot receive another payout in this cycle.
 
-Acceptance demo: three eligible wallets, 50,000-unit pool, sealed bids of 43,000 / 46,000 / 45,000. Reject 42,000 with Rahul's original secret; accept 43,000. Rahul wins, receives funding once, repays, and updates history. Names and business profiles stay off-chain.
+Commitments use the fixed Step 1 encoding and are hash-only until reveal. The demo should reject Rahul's attempted 42,000 reveal with his original 43,000 secret. Financial history affects eligibility, never bid ranking. Wallet addresses are protocol identities; business profiles remain frontend metadata.
 
-Before implementing the UI, test canonical Rust/TypeScript commitment encoding parity. Bids and secrets must stay local until reveal. Never expose a pre-reveal bid through a contract call or event.
-
-No credit scores, governance, protocol token, KYC, database, indexer, or lending infrastructure. Financial history controls eligibility, never the auction winner.
+No credit scores, interest, conventional loan repayment, KYC, governance, protocol token, database, backend, or indexer. The MVP records expected and completed contributions without an automatic overdue/default schedule. See [cycle and auction economics](step3-auction.md).

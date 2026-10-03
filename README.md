@@ -1,11 +1,11 @@
 # Community Finance Protocol
 
-Internal repository name: `paradox`. A six-hour hackathon MVP for community working-capital pools on Stellar Testnet. Transparent participation history determines eligibility; a sealed-bid commit/reveal auction allocates scarce capital to the lowest valid revealed bid.
+Internal repository name: `paradox`. Arth is a rotating community-finance MVP on Stellar Testnet. Members contribute a fixed amount each cycle round; a sealed-bid auction chooses who receives that round's discounted pot payout.
 
 ## Architecture
 
 - `apps/web`: Next.js App Router, TypeScript, Tailwind CSS, and Lucide. Stellar SDK and Freighter API are installed for later integration.
-- `contracts/community_pool`: one Rust/Soroban `CommunityPool` contract for the eventual pool, requests, auction, settlement, and repayment state.
+- `contracts/community_pool`: one Rust/Soroban `CommunityPool` contract for cycles, contributions, reserved round pots, sealed bids, payouts, and discount credits.
 - `packages/shared`: shared Stellar Testnet constants; future shared protocol types.
 - `scripts/check.sh`: repeatable scaffold checks.
 - `docs/mvp.md`: implementation boundary and acceptance demo.
@@ -45,11 +45,11 @@ For a production frontend process locally: `npm run start --workspace @paradox/w
 ## Current implementation status
 
 - Frontend foundation and placeholder routes: `/`, `/dashboard`, `/community`, `/request`, `/round/[id]`, `/history`.
-- The contract supports one community, authenticated membership and real token contributions, structured eligibility, capital requests, and bounded round creation. See [Step 2 contract notes](docs/step2-contract.md).
+- The contract supports one community, authenticated membership, fixed member cycles, real token contributions, structured eligibility, payout requests, and reserved round pots. See [contract state notes](docs/step2-contract.md).
 - Rust and TypeScript commitment hashes share five fixed vectors. The contract uses the same Rust hash to verify reveals.
 - A Testnet `version()` integration spike is deployed, but Freighter signing still awaits wallet setup. See [Step 1 integration notes](docs/step1-integration.md).
-- Sealed-bid commitment and reveal, winner selection, settlement, and repayment are implemented on-chain. See [Step 3 auction notes](docs/step3-auction.md). Frontend protocol integration and final Testnet deployment remain for later stages.
-- Contract tests cover real token balance changes, eligibility, requests, rounds, adversarial bids, settlement, and repayment. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
+- Sealed-bid commitment and reveal, winner selection, discounted payout, and one-time discount claiming are implemented on-chain. The winning bid is the payout amount, not loan principal. See [cycle and auction notes](docs/step3-auction.md). Frontend protocol integration and final Testnet deployment remain for later stages.
+- Contract tests cover token balances, cycle obligations, reserved pots, adversarial bids, payouts, discount conservation, and claims. Run `cargo test --workspace --locked` in addition to `npm run check` and `npm run test:commitment`.
 - shadcn/ui components and animation dependencies will be added only when needed during frontend implementation.
 
 Verification: the combined check script and HTTP smoke checks for all six routes passed locally. `npm audit --omit=dev` reports zero vulnerabilities. The full audit reports five high findings in the development-only ESLint dependency chain (`braces` / `micromatch` / `fast-glob`); no forced framework downgrade was applied.

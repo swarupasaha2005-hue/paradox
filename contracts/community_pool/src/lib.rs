@@ -9,6 +9,7 @@ use soroban_sdk::{
 mod commitment;
 
 const MAX_ROUND_REQUESTS: u32 = 10;
+const MAX_CYCLE_MEMBERS: u32 = 10;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,7 +45,16 @@ pub enum Error {
     FinalizationTooEarly = 28,
     NoWinner = 29,
     AlreadySettled = 30,
-    InvalidRepayment = 31,
+    CycleNotFound = 31,
+    CycleActive = 32,
+    CycleComplete = 33,
+    NotCycleMember = 34,
+    ContributionAlreadyMade = 35,
+    ContributionsIncomplete = 36,
+    RoundAlreadyActive = 37,
+    AlreadyPaidOut = 38,
+    NoDiscountToClaim = 39,
+    InvalidCycleSize = 40,
 }
 
 #[contracttype]
@@ -60,6 +70,10 @@ pub struct Community {
     pub available_pool: i128,
     pub request_counter: u64,
     pub round_counter: u64,
+    pub cycle_counter: u64,
+    pub current_cycle_id: Option<u64>,
+    pub reserved_pool: i128,
+    pub discount_liability: i128,
 }
 
 #[contracttype]
@@ -69,12 +83,36 @@ pub struct Member {
     pub contributions_completed: u32,
     pub contributions_missed: u32,
     pub total_contributed: i128,
-    pub financing_rounds_completed: u32,
-    pub repayments_completed: u32,
-    pub repayments_missed: u32,
+    pub payouts_received: u32,
+    pub total_payouts_received: i128,
+    pub discounts_claimed: i128,
     pub defaults: u32,
     pub unresolved_default: bool,
-    pub outstanding_financing: i128,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Cycle {
+    pub id: u64,
+    pub members: Vec<Address>,
+    pub current_round_number: u32,
+    pub active_round_id: Option<u64>,
+    pub payouts_completed: u32,
+    pub complete: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CycleMember {
+    pub cycle_id: u64,
+    pub member: Address,
+    pub payout_received: bool,
+    pub expected_contributions: u32,
+    pub completed_contributions: u32,
+    pub contributions_before_payout: u32,
+    pub contributions_after_payout: u32,
+    pub obligation_complete: bool,
+    pub claimable_discount: i128,
 }
 
 #[contracttype]
@@ -85,7 +123,9 @@ pub struct EligibilityResult {
     pub active: bool,
     pub contribution_requirement_met: bool,
     pub no_unresolved_default: bool,
-    pub no_outstanding_financing: bool,
+    pub in_cycle: bool,
+    pub current_round_contribution_met: bool,
+    pub payout_not_received: bool,
     pub valid_amount: bool,
     pub within_financing_limit: bool,
     pub contributions_completed: u32,
@@ -97,9 +137,8 @@ pub struct EligibilityResult {
 pub enum RequestStatus {
     Pending,
     IncludedInRound,
-    Funded,
-    Repaid,
-    Defaulted,
+    PaidOut,
+    NotSelected,
 }
 
 #[contracttype]
@@ -110,6 +149,8 @@ pub struct CapitalRequest {
     pub maximum_amount: i128,
     pub purpose_hash: BytesN<32>,
     pub status: RequestStatus,
+    pub cycle_id: u64,
+    pub cycle_round_number: u32,
 }
 
 #[contracttype]
@@ -125,9 +166,12 @@ pub enum RoundStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Round {
     pub id: u64,
+    pub cycle_id: u64,
+    pub cycle_round_number: u32,
     pub request_ids: Vec<u64>,
     pub participants: Vec<Address>,
     pub available_capital: i128,
+    pub pot: i128,
     pub commit_deadline: u64,
     pub reveal_deadline: u64,
     pub status: RoundStatus,
@@ -135,14 +179,17 @@ pub struct Round {
     pub winning_bid: Option<i128>,
     pub settled: bool,
     pub valid_reveal_count: u32,
-    pub outstanding_amount: i128,
-    pub due_date: Option<u64>,
+    pub auction_discount: i128,
+    pub discount_per_member: i128,
+    pub discount_remainder: u32,
 }
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PoolBalance {
     pub available_pool: i128,
+    pub reserved_pool: i128,
+    pub discount_liability: i128,
     pub token_balance: i128,
 }
 
@@ -152,6 +199,8 @@ enum DataKey {
     Member(Address),
     Request(u64),
     Round(u64),
+    Cycle(u64),
+    CycleMember(u64, Address),
     Commitment(u64, Address),
     Reveal(u64, Address),
 }
@@ -247,6 +296,43 @@ fn save_round(env: &Env, round: &Round) {
     bump_persistent(env, &key);
 }
 
+fn load_cycle(env: &Env, id: u64) -> Result<Cycle, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Cycle(id))
+        .ok_or(Error::CycleNotFound)
+}
+
+fn save_cycle(env: &Env, cycle: &Cycle) {
+    let key = DataKey::Cycle(cycle.id);
+    env.storage().persistent().set(&key, cycle);
+    bump_persistent(env, &key);
+}
+
+fn load_cycle_member(env: &Env, cycle_id: u64, address: &Address) -> Option<CycleMember> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::CycleMember(cycle_id, address.clone()))
+}
+
+fn save_cycle_member(env: &Env, state: &CycleMember) {
+    let key = DataKey::CycleMember(state.cycle_id, state.member.clone());
+    env.storage().persistent().set(&key, state);
+    bump_persistent(env, &key);
+}
+
+fn current_cycle(env: &Env, community: &Community) -> Result<Cycle, Error> {
+    load_cycle(env, community.current_cycle_id.ok_or(Error::CycleNotFound)?)
+}
+
+fn accounted_total(community: &Community) -> Result<i128, Error> {
+    community
+        .available_pool
+        .checked_add(community.reserved_pool)
+        .and_then(|value| value.checked_add(community.discount_liability))
+        .ok_or(Error::Overflow)
+}
+
 fn request_for_participant(
     env: &Env,
     round: &Round,
@@ -261,14 +347,26 @@ fn request_for_participant(
     Err(Error::NotParticipant)
 }
 
-fn eligibility(community: &Community, member: Option<&Member>, amount: i128) -> EligibilityResult {
+fn eligibility(
+    community: &Community,
+    member: Option<&Member>,
+    cycle: Option<&Cycle>,
+    cycle_member: Option<&CycleMember>,
+    amount: i128,
+) -> EligibilityResult {
     let is_member = member.is_some();
     let active = member.is_some_and(|m| m.active);
     let contributions_completed = member.map_or(0, |m| m.contributions_completed);
-    let contribution_requirement_met =
-        is_member && contributions_completed >= community.minimum_contributions;
+    let required = cycle.map_or(community.minimum_contributions, |c| {
+        core::cmp::min(community.minimum_contributions, c.current_round_number)
+    });
+    let contribution_requirement_met = is_member && contributions_completed >= required;
     let no_unresolved_default = member.is_some_and(|m| !m.unresolved_default);
-    let no_outstanding_financing = member.is_some_and(|m| m.outstanding_financing == 0);
+    let in_cycle = cycle_member.is_some();
+    let current_round_contribution_met = cycle_member.is_some_and(|m| {
+        cycle.is_some_and(|c| m.completed_contributions == c.current_round_number)
+    });
+    let payout_not_received = cycle_member.is_some_and(|m| !m.payout_received);
     let valid_amount = amount > 0;
     let within_financing_limit = amount <= community.financing_limit;
     EligibilityResult {
@@ -276,18 +374,23 @@ fn eligibility(community: &Community, member: Option<&Member>, amount: i128) -> 
             && active
             && contribution_requirement_met
             && no_unresolved_default
-            && no_outstanding_financing
+            && in_cycle
+            && current_round_contribution_met
+            && payout_not_received
+            && cycle.is_some_and(|c| !c.complete)
             && valid_amount
             && within_financing_limit,
         is_member,
         active,
         contribution_requirement_met,
         no_unresolved_default,
-        no_outstanding_financing,
+        in_cycle,
+        current_round_contribution_met,
+        payout_not_received,
         valid_amount,
         within_financing_limit,
         contributions_completed,
-        minimum_contributions: community.minimum_contributions,
+        minimum_contributions: required,
     }
 }
 
@@ -331,6 +434,10 @@ impl CommunityPool {
                 available_pool: 0,
                 request_counter: 0,
                 round_counter: 0,
+                cycle_counter: 0,
+                current_cycle_id: None,
+                reserved_pool: 0,
+                discount_liability: 0,
             },
         );
         CommunityCreated { admin }.publish(&env);
@@ -355,17 +462,75 @@ impl CommunityPool {
                 contributions_completed: 0,
                 contributions_missed: 0,
                 total_contributed: 0,
-                financing_rounds_completed: 0,
-                repayments_completed: 0,
-                repayments_missed: 0,
+                payouts_received: 0,
+                total_payouts_received: 0,
+                discounts_claimed: 0,
                 defaults: 0,
                 unresolved_default: false,
-                outstanding_financing: 0,
             },
         );
         save_community(&env, &community);
         MemberJoined { member }.publish(&env);
         Ok(())
+    }
+
+    pub fn create_cycle(env: Env, admin: Address, members: Vec<Address>) -> Result<u64, Error> {
+        let mut community = load_community(&env)?;
+        if admin != community.admin {
+            return Err(Error::Unauthorized);
+        }
+        admin.require_auth();
+        if members.is_empty() || members.len() > MAX_CYCLE_MEMBERS {
+            return Err(Error::InvalidCycleSize);
+        }
+        if let Some(id) = community.current_cycle_id {
+            if !load_cycle(&env, id)?.complete {
+                return Err(Error::CycleActive);
+            }
+        }
+        for (index, address) in members.iter().enumerate() {
+            if members.first_index_of(&address) != Some(index as u32) {
+                return Err(Error::DuplicateParticipant);
+            }
+            if !load_member(&env, &address).is_some_and(|member| member.active) {
+                return Err(Error::NotEligible);
+            }
+        }
+        let id = community
+            .cycle_counter
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+        for address in members.iter() {
+            save_cycle_member(
+                &env,
+                &CycleMember {
+                    cycle_id: id,
+                    member: address,
+                    payout_received: false,
+                    expected_contributions: 1,
+                    completed_contributions: 0,
+                    contributions_before_payout: 0,
+                    contributions_after_payout: 0,
+                    obligation_complete: false,
+                    claimable_discount: 0,
+                },
+            );
+        }
+        save_cycle(
+            &env,
+            &Cycle {
+                id,
+                members,
+                current_round_number: 1,
+                active_round_id: None,
+                payouts_completed: 0,
+                complete: false,
+            },
+        );
+        community.cycle_counter = id;
+        community.current_cycle_id = Some(id);
+        save_community(&env, &community);
+        Ok(id)
     }
 
     pub fn contribute(env: Env, member: Address) -> Result<(), Error> {
@@ -374,6 +539,21 @@ impl CommunityPool {
         let mut state = load_member(&env, &member).ok_or(Error::MemberNotFound)?;
         if !state.active {
             return Err(Error::InactiveMember);
+        }
+        let cycle = current_cycle(&env, &community)?;
+        if cycle.complete {
+            return Err(Error::CycleComplete);
+        }
+        if cycle.active_round_id.is_some() {
+            return Err(Error::RoundAlreadyActive);
+        }
+        let mut cycle_state =
+            load_cycle_member(&env, cycle.id, &member).ok_or(Error::NotCycleMember)?;
+        if cycle_state.completed_contributions >= cycle.current_round_number {
+            return Err(Error::ContributionAlreadyMade);
+        }
+        if cycle_state.completed_contributions + 1 != cycle.current_round_number {
+            return Err(Error::ContributionsIncomplete);
         }
         let completed = state
             .contributions_completed
@@ -395,8 +575,21 @@ impl CommunityPool {
         );
         state.contributions_completed = completed;
         state.total_contributed = total;
+        cycle_state.completed_contributions = cycle.current_round_number;
+        if cycle_state.payout_received {
+            cycle_state.contributions_after_payout = cycle_state
+                .contributions_after_payout
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
+        } else {
+            cycle_state.contributions_before_payout = cycle_state
+                .contributions_before_payout
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
+        }
         community.available_pool = available;
         save_member(&env, &member, &state);
+        save_cycle_member(&env, &cycle_state);
         save_community(&env, &community);
         ContributionMade {
             member,
@@ -421,7 +614,20 @@ impl CommunityPool {
         if !state.active {
             return Err(Error::InactiveMember);
         }
-        if !eligibility(&community, Some(&state), amount).eligible {
+        let cycle = current_cycle(&env, &community)?;
+        if cycle.active_round_id.is_some() {
+            return Err(Error::RoundAlreadyActive);
+        }
+        let cycle_member = load_cycle_member(&env, cycle.id, &member);
+        if !eligibility(
+            &community,
+            Some(&state),
+            Some(&cycle),
+            cycle_member.as_ref(),
+            amount,
+        )
+        .eligible
+        {
             return Err(Error::NotEligible);
         }
         let id = community
@@ -436,6 +642,8 @@ impl CommunityPool {
                 maximum_amount: amount,
                 purpose_hash,
                 status: RequestStatus::Pending,
+                cycle_id: cycle.id,
+                cycle_round_number: cycle.current_round_number,
             },
         );
         community.request_counter = id;
@@ -466,15 +674,36 @@ impl CommunityPool {
         if commit_deadline <= env.ledger().timestamp() || reveal_deadline <= commit_deadline {
             return Err(Error::InvalidDeadline);
         }
+        let mut cycle = current_cycle(&env, &community)?;
+        if cycle.complete {
+            return Err(Error::CycleComplete);
+        }
+        if cycle.active_round_id.is_some() {
+            return Err(Error::RoundAlreadyActive);
+        }
+        for address in cycle.members.iter() {
+            let state = load_cycle_member(&env, cycle.id, &address).ok_or(Error::NotCycleMember)?;
+            if state.completed_contributions != cycle.current_round_number {
+                return Err(Error::ContributionsIncomplete);
+            }
+        }
+        let pot = community
+            .contribution_amount
+            .checked_mul(i128::from(cycle.members.len()))
+            .ok_or(Error::Overflow)?;
         let token_balance =
             TokenClient::new(&env, &community.asset).balance(&env.current_contract_address());
-        let available_capital = core::cmp::min(community.available_pool, token_balance);
-        if available_capital <= 0 {
+        if community.available_pool < pot || token_balance < accounted_total(&community)? {
             return Err(Error::InsufficientPoolBalance);
         }
         let mut participants = Vec::new(&env);
         for request_id in request_ids.iter() {
             let request = load_request(&env, request_id)?;
+            if request.cycle_id != cycle.id
+                || request.cycle_round_number != cycle.current_round_number
+            {
+                return Err(Error::InvalidRequestStatus);
+            }
             if request.status != RequestStatus::Pending {
                 return Err(Error::InvalidRequestStatus);
             }
@@ -482,7 +711,16 @@ impl CommunityPool {
                 return Err(Error::DuplicateParticipant);
             }
             let member = load_member(&env, &request.member);
-            if !eligibility(&community, member.as_ref(), request.maximum_amount).eligible {
+            let cycle_member = load_cycle_member(&env, cycle.id, &request.member);
+            if !eligibility(
+                &community,
+                member.as_ref(),
+                Some(&cycle),
+                cycle_member.as_ref(),
+                request.maximum_amount,
+            )
+            .eligible
+            {
                 return Err(Error::NotEligible);
             }
             participants.push_back(request.member);
@@ -498,9 +736,12 @@ impl CommunityPool {
         }
         let round = Round {
             id,
+            cycle_id: cycle.id,
+            cycle_round_number: cycle.current_round_number,
             request_ids,
             participants,
-            available_capital,
+            available_capital: pot,
+            pot,
             commit_deadline,
             reveal_deadline,
             status: RoundStatus::Commit,
@@ -508,10 +749,21 @@ impl CommunityPool {
             winning_bid: None,
             settled: false,
             valid_reveal_count: 0,
-            outstanding_amount: 0,
-            due_date: None,
+            auction_discount: 0,
+            discount_per_member: 0,
+            discount_remainder: 0,
         };
         save_round(&env, &round);
+        cycle.active_round_id = Some(id);
+        save_cycle(&env, &cycle);
+        community.available_pool = community
+            .available_pool
+            .checked_sub(pot)
+            .ok_or(Error::Overflow)?;
+        community.reserved_pool = community
+            .reserved_pool
+            .checked_add(pot)
+            .ok_or(Error::Overflow)?;
         community.round_counter = id;
         save_community(&env, &community);
         RoundCreated { round_id: id }.publish(&env);
@@ -538,7 +790,17 @@ impl CommunityPool {
         }
         let request = request_for_participant(&env, &round, &participant)?;
         let member = load_member(&env, &participant);
-        if !eligibility(&community, member.as_ref(), request.maximum_amount).eligible {
+        let cycle = load_cycle(&env, round.cycle_id)?;
+        let cycle_member = load_cycle_member(&env, cycle.id, &participant);
+        if !eligibility(
+            &community,
+            member.as_ref(),
+            Some(&cycle),
+            cycle_member.as_ref(),
+            request.maximum_amount,
+        )
+        .eligible
+        {
             return Err(Error::NotEligible);
         }
         let key = DataKey::Commitment(round_id, participant);
@@ -653,11 +915,31 @@ impl CommunityPool {
         round.winner = best_wallet;
         round.winning_bid = best_amount;
         round.status = RoundStatus::Finalized;
+        if round.winner.is_none() {
+            let mut community = load_community(&env)?;
+            let mut cycle = load_cycle(&env, round.cycle_id)?;
+            community.reserved_pool = community
+                .reserved_pool
+                .checked_sub(round.pot)
+                .ok_or(Error::Overflow)?;
+            community.available_pool = community
+                .available_pool
+                .checked_add(round.pot)
+                .ok_or(Error::Overflow)?;
+            cycle.active_round_id = None;
+            for request_id in round.request_ids.iter() {
+                let mut request = load_request(&env, request_id)?;
+                request.status = RequestStatus::Pending;
+                save_request(&env, &request);
+            }
+            save_cycle(&env, &cycle);
+            save_community(&env, &community);
+        }
         save_round(&env, &round);
         Ok(())
     }
 
-    pub fn settle(env: Env, round_id: u64, winner: Address, due_date: u64) -> Result<(), Error> {
+    pub fn settle(env: Env, round_id: u64, winner: Address) -> Result<(), Error> {
         let mut community = load_community(&env)?;
         winner.require_auth();
         let mut round = load_round(&env, round_id)?;
@@ -670,112 +952,156 @@ impl CommunityPool {
         if round.winner.as_ref() != Some(&winner) {
             return Err(Error::NoWinner);
         }
-        if due_date <= env.ledger().timestamp() {
-            return Err(Error::InvalidDeadline);
-        }
         let amount = round.winning_bid.ok_or(Error::NoWinner)?;
-        if amount <= 0 || amount > community.available_pool {
+        let mut cycle = load_cycle(&env, round.cycle_id)?;
+        if cycle.complete || cycle.active_round_id != Some(round_id) {
+            return Err(Error::InvalidRoundStatus);
+        }
+        let winner_state =
+            load_cycle_member(&env, cycle.id, &winner).ok_or(Error::NotCycleMember)?;
+        if winner_state.payout_received {
+            return Err(Error::AlreadyPaidOut);
+        }
+        let mut member = load_member(&env, &winner).ok_or(Error::MemberNotFound)?;
+        if !member.active || member.unresolved_default {
+            return Err(Error::NotEligible);
+        }
+        if amount <= 0 || amount > round.pot || community.reserved_pool < round.pot {
             return Err(Error::InsufficientPoolBalance);
         }
         let token = TokenClient::new(&env, &community.asset);
-        if token.balance(&env.current_contract_address()) < amount {
+        if token.balance(&env.current_contract_address()) < accounted_total(&community)? {
             return Err(Error::InsufficientPoolBalance);
         }
-        let mut member = load_member(&env, &winner).ok_or(Error::MemberNotFound)?;
-        if !member.active || member.unresolved_default || member.outstanding_financing != 0 {
-            return Err(Error::NotEligible);
-        }
-        let mut request = request_for_participant(&env, &round, &winner)?;
-        if request.status != RequestStatus::IncludedInRound {
-            return Err(Error::InvalidRequestStatus);
-        }
-        let available = community
-            .available_pool
-            .checked_sub(amount)
+        let discount = round.pot.checked_sub(amount).ok_or(Error::Overflow)?;
+        let member_count = i128::from(cycle.members.len());
+        let equal_share = discount / member_count;
+        let remainder = u32::try_from(discount % member_count).map_err(|_| Error::Overflow)?;
+        let credited = equal_share
+            .checked_mul(member_count)
+            .and_then(|value| value.checked_add(i128::from(remainder)))
             .ok_or(Error::Overflow)?;
-        let destination = MuxedAddress::from(&winner);
-        token.transfer(&env.current_contract_address(), &destination, &amount);
-        community.available_pool = available;
-        member.outstanding_financing = amount;
-        request.status = RequestStatus::Funded;
-        round.outstanding_amount = amount;
-        round.due_date = Some(due_date);
+        if amount.checked_add(credited) != Some(round.pot) {
+            return Err(Error::Overflow);
+        }
+        let next_payouts = cycle
+            .payouts_completed
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+        let cycle_complete = next_payouts == cycle.members.len();
+        for address in cycle.members.iter() {
+            let mut state =
+                load_cycle_member(&env, cycle.id, &address).ok_or(Error::NotCycleMember)?;
+            let mut rank = 0u32;
+            for other in cycle.members.iter() {
+                if other.to_string() < address.to_string() {
+                    rank = rank.checked_add(1).ok_or(Error::Overflow)?;
+                }
+            }
+            let extra = if rank < remainder { 1 } else { 0 };
+            state.claimable_discount = state
+                .claimable_discount
+                .checked_add(equal_share + extra)
+                .ok_or(Error::Overflow)?;
+            if address == winner {
+                state.payout_received = true;
+            }
+            if cycle_complete {
+                state.obligation_complete =
+                    state.completed_contributions == state.expected_contributions;
+            } else {
+                state.expected_contributions = state
+                    .expected_contributions
+                    .checked_add(1)
+                    .ok_or(Error::Overflow)?;
+            }
+            save_cycle_member(&env, &state);
+        }
+        member.payouts_received = member
+            .payouts_received
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+        member.total_payouts_received = member
+            .total_payouts_received
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
+        community.reserved_pool = community
+            .reserved_pool
+            .checked_sub(round.pot)
+            .ok_or(Error::Overflow)?;
+        community.discount_liability = community
+            .discount_liability
+            .checked_add(discount)
+            .ok_or(Error::Overflow)?;
+        for request_id in round.request_ids.iter() {
+            let mut request = load_request(&env, request_id)?;
+            request.status = if request.member == winner {
+                RequestStatus::PaidOut
+            } else {
+                RequestStatus::NotSelected
+            };
+            save_request(&env, &request);
+        }
+        cycle.payouts_completed = next_payouts;
+        cycle.active_round_id = None;
+        cycle.complete = cycle_complete;
+        if !cycle_complete {
+            cycle.current_round_number = cycle
+                .current_round_number
+                .checked_add(1)
+                .ok_or(Error::Overflow)?;
+        }
+        round.auction_discount = discount;
+        round.discount_per_member = equal_share;
+        round.discount_remainder = remainder;
         round.settled = true;
         round.status = RoundStatus::Settled;
+        token.transfer(
+            &env.current_contract_address(),
+            &MuxedAddress::from(&winner),
+            &amount,
+        );
         save_member(&env, &winner, &member);
-        save_request(&env, &request);
+        save_cycle(&env, &cycle);
         save_round(&env, &round);
         save_community(&env, &community);
         Ok(())
     }
 
-    pub fn repay(
-        env: Env,
-        round_id: u64,
-        member_address: Address,
-        amount: i128,
-    ) -> Result<(), Error> {
+    pub fn claim_discount(env: Env, cycle_id: u64, member: Address) -> Result<i128, Error> {
         let mut community = load_community(&env)?;
-        member_address.require_auth();
-        let mut round = load_round(&env, round_id)?;
-        if round.status != RoundStatus::Settled || round.winner.as_ref() != Some(&member_address) {
-            return Err(Error::InvalidRoundStatus);
+        member.require_auth();
+        load_cycle(&env, cycle_id)?;
+        let mut state = load_cycle_member(&env, cycle_id, &member).ok_or(Error::NotCycleMember)?;
+        let amount = state.claimable_discount;
+        if amount <= 0 {
+            return Err(Error::NoDiscountToClaim);
         }
-        if amount <= 0 || amount > round.outstanding_amount {
-            return Err(Error::InvalidRepayment);
+        let mut history = load_member(&env, &member).ok_or(Error::MemberNotFound)?;
+        let token = TokenClient::new(&env, &community.asset);
+        if token.balance(&env.current_contract_address()) < accounted_total(&community)? {
+            return Err(Error::InsufficientPoolBalance);
         }
-        let mut member = load_member(&env, &member_address).ok_or(Error::MemberNotFound)?;
-        if amount > member.outstanding_financing {
-            return Err(Error::InvalidRepayment);
-        }
-        let available = community
-            .available_pool
+        let next_claimed = history
+            .discounts_claimed
             .checked_add(amount)
             .ok_or(Error::Overflow)?;
-        let outstanding = round
-            .outstanding_amount
+        let next_liability = community
+            .discount_liability
             .checked_sub(amount)
             .ok_or(Error::Overflow)?;
-        let member_outstanding = member
-            .outstanding_financing
-            .checked_sub(amount)
-            .ok_or(Error::Overflow)?;
-        let (completed_rounds, completed_repayments) = if outstanding == 0 {
-            (
-                member
-                    .financing_rounds_completed
-                    .checked_add(1)
-                    .ok_or(Error::Overflow)?,
-                member
-                    .repayments_completed
-                    .checked_add(1)
-                    .ok_or(Error::Overflow)?,
-            )
-        } else {
-            (
-                member.financing_rounds_completed,
-                member.repayments_completed,
-            )
-        };
-        let destination = MuxedAddress::from(env.current_contract_address());
-        TokenClient::new(&env, &community.asset).transfer(&member_address, &destination, &amount);
-        community.available_pool = available;
-        round.outstanding_amount = outstanding;
-        member.outstanding_financing = member_outstanding;
-        member.financing_rounds_completed = completed_rounds;
-        member.repayments_completed = completed_repayments;
-        if outstanding == 0 {
-            let mut request = request_for_participant(&env, &round, &member_address)?;
-            if request.status != RequestStatus::Funded {
-                return Err(Error::InvalidRequestStatus);
-            }
-            request.status = RequestStatus::Repaid;
-            save_request(&env, &request);
-        }
-        save_member(&env, &member_address, &member);
-        save_round(&env, &round);
+        token.transfer(
+            &env.current_contract_address(),
+            &MuxedAddress::from(&member),
+            &amount,
+        );
+        state.claimable_discount = 0;
+        history.discounts_claimed = next_claimed;
+        community.discount_liability = next_liability;
+        save_cycle_member(&env, &state);
+        save_member(&env, &member, &history);
         save_community(&env, &community);
-        Ok(())
+        Ok(amount)
     }
 
     pub fn get_commitment(
@@ -812,6 +1138,8 @@ impl CommunityPool {
         let community = load_community(&env)?;
         Ok(PoolBalance {
             available_pool: community.available_pool,
+            reserved_pool: community.reserved_pool,
+            discount_liability: community.discount_liability,
             token_balance: TokenClient::new(&env, &community.asset)
                 .balance(&env.current_contract_address()),
         })
@@ -834,7 +1162,34 @@ impl CommunityPool {
     ) -> Result<EligibilityResult, Error> {
         let community = load_community(&env)?;
         let member = load_member(&env, &address);
-        Ok(eligibility(&community, member.as_ref(), amount))
+        let cycle = community
+            .current_cycle_id
+            .and_then(|id| load_cycle(&env, id).ok());
+        let cycle_member = cycle
+            .as_ref()
+            .and_then(|state| load_cycle_member(&env, state.id, &address));
+        Ok(eligibility(
+            &community,
+            member.as_ref(),
+            cycle.as_ref(),
+            cycle_member.as_ref(),
+            amount,
+        ))
+    }
+
+    pub fn get_cycle(env: Env, cycle_id: u64) -> Result<Cycle, Error> {
+        load_community(&env)?;
+        load_cycle(&env, cycle_id)
+    }
+
+    pub fn get_cycle_member(
+        env: Env,
+        cycle_id: u64,
+        member: Address,
+    ) -> Result<CycleMember, Error> {
+        load_community(&env)?;
+        load_cycle(&env, cycle_id)?;
+        load_cycle_member(&env, cycle_id, &member).ok_or(Error::NotCycleMember)
     }
 
     pub fn get_request(env: Env, request_id: u64) -> Result<CapitalRequest, Error> {

@@ -5,16 +5,14 @@ use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, vec};
 
 const UNIT: i128 = 10_000_000;
 const CONTRIBUTION: i128 = 5_000 * UNIT;
-const LIMIT: i128 = 50_000 * UNIT;
+const POT: i128 = 50_000 * UNIT;
 
 struct Fixture {
     env: Env,
     contract: Address,
     admin: Address,
     asset: Address,
-    rahul: Address,
-    riya: Address,
-    aman: Address,
+    members: Vec<Address>,
 }
 
 impl Fixture {
@@ -22,44 +20,44 @@ impl Fixture {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let rahul = Address::generate(&env);
-        let riya = Address::generate(&env);
-        let aman = Address::generate(&env);
         let asset = env
             .register_stellar_asset_contract_v2(admin.clone())
             .address();
         let contract = env.register(CommunityPool, ());
-        let fixture = Self {
+        let client = CommunityPoolClient::new(&env, &contract);
+        client.create_community(&admin, &asset, &CONTRIBUTION, &3, &POT);
+        let mut members = Vec::new(&env);
+        let issuer = StellarAssetClient::new(&env, &asset);
+        for _ in 0..10 {
+            let address = Address::generate(&env);
+            issuer.mint(&address, &POT);
+            client.join(&address);
+            members.push_back(address);
+        }
+        Self {
             env,
             contract,
             admin,
             asset,
-            rahul,
-            riya,
-            aman,
-        };
-        fixture.client().create_community(
-            &fixture.admin,
-            &fixture.asset,
-            &CONTRIBUTION,
-            &3,
-            &LIMIT,
-        );
-        let issuer = StellarAssetClient::new(&fixture.env, &fixture.asset);
-        for wallet in [&fixture.rahul, &fixture.riya, &fixture.aman] {
-            issuer.mint(wallet, &(100_000 * UNIT));
+            members,
         }
-        fixture
     }
 
     fn client(&self) -> CommunityPoolClient<'_> {
         CommunityPoolClient::new(&self.env, &self.contract)
     }
 
-    fn contribute_n(&self, wallet: &Address, count: usize) {
-        self.client().join(wallet);
-        for _ in 0..count {
-            self.client().contribute(wallet);
+    fn first(&self) -> Address {
+        self.members.get(0).unwrap()
+    }
+
+    fn start_cycle(&self) -> u64 {
+        self.client().create_cycle(&self.admin, &self.members)
+    }
+
+    fn fund_round(&self) {
+        for member in self.members.iter() {
+            self.client().contribute(&member);
         }
     }
 
@@ -69,28 +67,30 @@ impl Fixture {
 }
 
 #[test]
-fn community_initialized_once_with_real_token() {
+fn community_and_membership_initialize_once() {
     let f = Fixture::new();
     let state = f.client().get_community();
     assert!(state.initialized);
-    assert_eq!(state.admin, f.admin);
     assert_eq!(state.asset, f.asset);
+    assert_eq!(state.member_count, 10);
     assert_eq!(state.contribution_amount, CONTRIBUTION);
     assert_eq!(state.minimum_contributions, 3);
-    assert_eq!(state.financing_limit, LIMIT);
-    assert_eq!(state.member_count, 0);
     assert_eq!(state.available_pool, 0);
-    assert_eq!(state.request_counter, 0);
-    assert_eq!(state.round_counter, 0);
+    assert_eq!(state.reserved_pool, 0);
+    assert_eq!(state.discount_liability, 0);
+    assert_eq!(
+        f.client().try_join(&f.first()),
+        Err(Ok(Error::MemberAlreadyExists))
+    );
     assert_eq!(
         f.client()
-            .try_create_community(&f.admin, &f.asset, &CONTRIBUTION, &3, &LIMIT),
+            .try_create_community(&f.admin, &f.asset, &CONTRIBUTION, &3, &POT),
         Err(Ok(Error::AlreadyInitialized))
     );
 }
 
 #[test]
-fn rejects_invalid_initialization_and_unauthorized_wallet_actions() {
+fn invalid_initialization_and_cycle_membership_are_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
@@ -101,291 +101,218 @@ fn rejects_invalid_initialization_and_unauthorized_wallet_actions() {
     let client = CommunityPoolClient::new(&env, &contract);
     assert_eq!(client.try_join(&admin), Err(Ok(Error::NotInitialized)));
     assert_eq!(
-        client.try_create_community(&admin, &asset, &0, &3, &LIMIT),
+        client.try_create_community(&admin, &asset, &0, &3, &POT),
         Err(Ok(Error::InvalidAmount))
     );
     assert_eq!(
-        client.try_create_community(&admin, &contract, &CONTRIBUTION, &3, &LIMIT),
+        client.try_create_community(&admin, &contract, &CONTRIBUTION, &3, &POT),
         Err(Ok(Error::InvalidAsset))
     );
     env.set_auths(&[]);
     assert!(client
-        .try_create_community(&admin, &asset, &CONTRIBUTION, &3, &LIMIT)
+        .try_create_community(&admin, &asset, &CONTRIBUTION, &3, &POT)
         .is_err());
-    env.mock_all_auths();
-    client.create_community(&admin, &asset, &CONTRIBUTION, &3, &LIMIT);
-    env.set_auths(&[]);
-    assert!(client.try_join(&admin).is_err());
-
-    env.mock_all_auths();
-    client.join(&admin);
-    env.set_auths(&[]);
-    assert!(client.try_contribute(&admin).is_err());
-    assert!(client
-        .try_request_capital(&admin, &LIMIT, &BytesN::from_array(&env, &[0; 32]))
-        .is_err());
+    let f = Fixture::new();
+    let outsider = Address::generate(&f.env);
+    assert_eq!(
+        f.client().try_contribute(&f.first()),
+        Err(Ok(Error::CycleNotFound))
+    );
+    assert_eq!(
+        f.client().try_create_cycle(&f.first(), &f.members),
+        Err(Ok(Error::Unauthorized))
+    );
+    assert_eq!(
+        f.client()
+            .try_create_cycle(&f.admin, &vec![&f.env, f.first(), f.first()]),
+        Err(Ok(Error::DuplicateParticipant))
+    );
+    let cycle = f.start_cycle();
+    assert_eq!(cycle, 1);
+    assert_eq!(
+        f.client().try_create_cycle(&f.admin, &f.members),
+        Err(Ok(Error::CycleActive))
+    );
+    assert_eq!(
+        f.client().try_contribute(&outsider),
+        Err(Ok(Error::MemberNotFound))
+    );
 }
 
 #[test]
-fn join_and_real_contribution_update_balances_and_history() {
+fn ten_real_contributions_make_exact_fifty_thousand_pot() {
     let f = Fixture::new();
-    let client = f.client();
-    assert!(!client.is_member(&f.rahul));
-    client.join(&f.rahul);
-    assert!(client.is_member(&f.rahul));
-    assert_eq!(client.get_community().member_count, 1);
+    let cycle = f.start_cycle();
+    let token = soroban_sdk::token::TokenClient::new(&f.env, &f.asset);
+    let first = f.first();
+    let first_before = token.balance(&first);
+    f.fund_round();
+    assert_eq!(token.balance(&first), first_before - CONTRIBUTION);
+    assert_eq!(token.balance(&f.contract), POT);
+    let balance = f.client().get_pool_balance();
+    assert_eq!(balance.available_pool, POT);
+    assert_eq!(balance.reserved_pool, 0);
+    assert_eq!(balance.token_balance, POT);
+    assert_eq!(f.client().get_member(&first).contributions_completed, 1);
     assert_eq!(
-        client.try_join(&f.rahul),
-        Err(Ok(Error::MemberAlreadyExists))
+        f.client().get_member(&first).total_contributed,
+        CONTRIBUTION
     );
     assert_eq!(
-        client.try_contribute(&f.riya),
-        Err(Ok(Error::MemberNotFound))
+        f.client()
+            .get_cycle_member(&cycle, &first)
+            .completed_contributions,
+        1
     );
-
-    let token = TokenClient::new(&f.env, &f.asset);
-    assert_eq!(token.decimals(), 7);
-    let before_member = token.balance(&f.rahul);
-    let before_pool = token.balance(&f.contract);
-    client.contribute(&f.rahul);
-    assert_eq!(token.balance(&f.rahul), before_member - CONTRIBUTION);
-    assert_eq!(token.balance(&f.contract), before_pool + CONTRIBUTION);
-    let balance = client.get_pool_balance();
-    assert_eq!(balance.available_pool, CONTRIBUTION);
-    assert_eq!(balance.token_balance, CONTRIBUTION);
-    let history = client.get_member(&f.rahul);
-    assert_eq!(history.contributions_completed, 1);
-    assert_eq!(history.total_contributed, CONTRIBUTION);
-    assert_eq!(history.contributions_missed, 0);
-    assert_eq!(history.repayments_missed, 0);
-    assert!(!history.unresolved_default);
+    assert_eq!(
+        f.client().try_contribute(&first),
+        Err(Ok(Error::ContributionAlreadyMade))
+    );
+    let eligibility = f.client().get_eligibility(&first, &(43_000 * UNIT));
+    assert!(eligibility.eligible);
+    assert!(eligibility.current_round_contribution_met);
+    assert!(eligibility.payout_not_received);
+    assert_eq!(eligibility.minimum_contributions, 1);
 }
 
 #[test]
 fn failed_token_transfer_does_not_advance_accounting() {
     let f = Fixture::new();
-    let unfunded = Address::generate(&f.env);
-    let client = f.client();
-    client.join(&unfunded);
-    assert!(client.try_contribute(&unfunded).is_err());
-    assert_eq!(client.get_member(&unfunded).contributions_completed, 0);
-    assert_eq!(client.get_member(&unfunded).total_contributed, 0);
-    assert_eq!(client.get_pool_balance().available_pool, 0);
-    assert_eq!(client.get_pool_balance().token_balance, 0);
+    let cycle = f.start_cycle();
+    let first = f.first();
+    let token = soroban_sdk::token::TokenClient::new(&f.env, &f.asset);
+    token.transfer(&first, &MuxedAddress::from(&f.admin), &POT);
+    assert!(f.client().try_contribute(&first).is_err());
+    assert_eq!(f.client().get_member(&first).contributions_completed, 0);
+    assert_eq!(
+        f.client()
+            .get_cycle_member(&cycle, &first)
+            .completed_contributions,
+        0
+    );
+    assert_eq!(f.client().get_pool_balance().available_pool, 0);
 }
 
 #[test]
-fn eligibility_flags_explain_inactive_default_and_outstanding() {
+fn eligibility_reasons_and_request_limit_remain_explicit() {
     let f = Fixture::new();
-    f.contribute_n(&f.rahul, 3);
-    let amount = 43_000 * UNIT;
-    let mut member = f.client().get_member(&f.rahul);
-    member.active = false;
-    f.env
-        .as_contract(&f.contract, || save_member(&f.env, &f.rahul, &member));
-    let result = f.client().get_eligibility(&f.rahul, &amount);
-    assert!(!result.eligible);
-    assert!(!result.active);
-    assert_eq!(
-        f.client().try_contribute(&f.rahul),
-        Err(Ok(Error::InactiveMember))
-    );
+    f.start_cycle();
+    let first = f.first();
+    let before = f.client().get_eligibility(&first, &(43_000 * UNIT));
+    assert!(!before.eligible);
+    assert!(!before.current_round_contribution_met);
+    f.client().contribute(&first);
+    assert!(f.client().get_eligibility(&first, &POT).eligible);
+    let over = f.client().get_eligibility(&first, &(POT + 1));
+    assert!(!over.eligible);
+    assert!(!over.within_financing_limit);
     assert_eq!(
         f.client()
-            .try_request_capital(&f.rahul, &amount, &f.purpose()),
-        Err(Ok(Error::InactiveMember))
-    );
-
-    member.active = true;
-    member.unresolved_default = true;
-    f.env
-        .as_contract(&f.contract, || save_member(&f.env, &f.rahul, &member));
-    let result = f.client().get_eligibility(&f.rahul, &amount);
-    assert!(!result.eligible);
-    assert!(!result.no_unresolved_default);
-    assert_eq!(
-        f.client()
-            .try_request_capital(&f.rahul, &amount, &f.purpose()),
-        Err(Ok(Error::NotEligible))
-    );
-
-    member.unresolved_default = false;
-    member.outstanding_financing = 1;
-    f.env
-        .as_contract(&f.contract, || save_member(&f.env, &f.rahul, &member));
-    let result = f.client().get_eligibility(&f.rahul, &amount);
-    assert!(!result.eligible);
-    assert!(!result.no_outstanding_financing);
-    assert_eq!(
-        f.client()
-            .try_request_capital(&f.rahul, &amount, &f.purpose()),
-        Err(Ok(Error::NotEligible))
-    );
-}
-
-#[test]
-fn three_contributions_and_financing_limit_control_eligibility() {
-    let f = Fixture::new();
-    let client = f.client();
-    let amount = 43_000 * UNIT;
-    let missing = client.get_eligibility(&f.rahul, &amount);
-    assert!(!missing.eligible);
-    assert!(!missing.is_member);
-    assert_eq!(missing.minimum_contributions, 3);
-    client.join(&f.rahul);
-    for completed in 0..3 {
-        let state = client.get_eligibility(&f.rahul, &amount);
-        assert!(!state.eligible);
-        assert!(!state.contribution_requirement_met);
-        assert_eq!(state.contributions_completed, completed);
-        assert_eq!(
-            client.try_request_capital(&f.rahul, &amount, &f.purpose()),
-            Err(Ok(Error::NotEligible))
-        );
-        client.contribute(&f.rahul);
-    }
-    assert!(client.get_eligibility(&f.rahul, &amount).eligible);
-    assert!(client.get_eligibility(&f.rahul, &LIMIT).eligible);
-    let over_limit = client.get_eligibility(&f.rahul, &(LIMIT + 1));
-    assert!(!over_limit.eligible);
-    assert!(!over_limit.within_financing_limit);
-    assert_eq!(
-        client.try_request_capital(&f.rahul, &(LIMIT + 1), &f.purpose()),
+            .try_request_capital(&first, &(POT + 1), &f.purpose()),
         Err(Ok(Error::InvalidAmount))
     );
-    let zero = client.get_eligibility(&f.rahul, &0);
-    assert!(!zero.eligible);
-    assert!(!zero.valid_amount);
-}
-
-#[test]
-fn eligible_capital_request_is_pending_and_indexed() {
-    let f = Fixture::new();
-    f.contribute_n(&f.rahul, 3);
-    let id = f
-        .client()
-        .request_capital(&f.rahul, &(43_000 * UNIT), &f.purpose());
-    assert_eq!(id, 1);
-    let request = f.client().get_request(&id);
-    assert_eq!(request.member, f.rahul);
-    assert_eq!(request.maximum_amount, 43_000 * UNIT);
-    assert_eq!(request.purpose_hash, f.purpose());
-    assert_eq!(request.status, RequestStatus::Pending);
-    assert_eq!(f.client().get_community().request_counter, 1);
+    let mut state = f.client().get_member(&first);
+    state.unresolved_default = true;
+    f.env
+        .as_contract(&f.contract, || save_member(&f.env, &first, &state));
+    assert!(
+        !f.client()
+            .get_eligibility(&first, &POT)
+            .no_unresolved_default
+    );
     assert_eq!(
-        f.client().try_get_request(&2),
-        Err(Ok(Error::RequestNotFound))
+        f.client().try_request_capital(&first, &POT, &f.purpose()),
+        Err(Ok(Error::NotEligible))
+    );
+    state.unresolved_default = false;
+    state.active = false;
+    f.env
+        .as_contract(&f.contract, || save_member(&f.env, &first, &state));
+    assert_eq!(
+        f.client().try_contribute(&first),
+        Err(Ok(Error::InactiveMember))
     );
 }
 
 #[test]
-fn round_caps_capital_below_request_maximum() {
+fn requests_and_round_reserve_only_current_contributions() {
     let f = Fixture::new();
-    f.contribute_n(&f.rahul, 3);
-    let client = f.client();
-    let request = client.request_capital(&f.rahul, &(43_000 * UNIT), &f.purpose());
-    let round_id = client.create_round(&f.admin, &vec![&f.env, request], &100, &200);
-    assert_eq!(client.get_round(&round_id).available_capital, 15_000 * UNIT);
+    let cycle = f.start_cycle();
+    let first = f.first();
+    assert!(
+        !f.client()
+            .get_eligibility(&first, &(43_000 * UNIT))
+            .eligible
+    );
+    f.client().contribute(&first);
+    let request = f
+        .client()
+        .request_capital(&first, &(43_000 * UNIT), &f.purpose());
+    assert_eq!(f.client().get_request(&request).cycle_id, cycle);
     assert_eq!(
-        client.get_request(&request).status,
+        f.client().get_request(&request).status,
+        RequestStatus::Pending
+    );
+    assert_eq!(
+        f.client()
+            .try_create_round(&f.admin, &vec![&f.env, request], &100, &200),
+        Err(Ok(Error::ContributionsIncomplete))
+    );
+    for member in f.members.iter() {
+        if member != first {
+            f.client().contribute(&member);
+        }
+    }
+    let round_id = f
+        .client()
+        .create_round(&f.admin, &vec![&f.env, request], &100, &200);
+    let round = f.client().get_round(&round_id);
+    assert_eq!(round.pot, POT);
+    assert_eq!(round.available_capital, POT);
+    assert_eq!(round.cycle_round_number, 1);
+    assert_eq!(round.status, RoundStatus::Commit);
+    assert_eq!(
+        f.client().get_request(&request).status,
         RequestStatus::IncludedInRound
     );
+    assert_eq!(f.client().get_pool_balance().available_pool, 0);
+    assert_eq!(f.client().get_pool_balance().reserved_pool, POT);
+    assert_eq!(f.client().get_cycle(&cycle).active_round_id, Some(round_id));
 }
 
 #[test]
-fn round_cap_uses_actual_token_balance_when_lower_than_accounting() {
+fn invalid_rounds_and_actual_balance_are_checked() {
     let f = Fixture::new();
-    f.contribute_n(&f.rahul, 3);
-    let client = f.client();
-    let token = TokenClient::new(&f.env, &f.asset);
-    // Simulate a prior outflow before settlement accounting exists in Step 3.
-    token.transfer(&f.contract, &MuxedAddress::from(&f.admin), &(10_000 * UNIT));
-    let balance = client.get_pool_balance();
-    assert_eq!(balance.available_pool, 15_000 * UNIT);
-    assert_eq!(balance.token_balance, 5_000 * UNIT);
-    let request = client.request_capital(&f.rahul, &(43_000 * UNIT), &f.purpose());
-    let round = client.create_round(&f.admin, &vec![&f.env, request], &100, &200);
-    assert_eq!(client.get_round(&round).available_capital, 5_000 * UNIT);
-
-    token.transfer(&f.contract, &MuxedAddress::from(&f.admin), &(5_000 * UNIT));
-    let next = client.request_capital(&f.rahul, &(43_000 * UNIT), &f.purpose());
+    f.start_cycle();
+    f.fund_round();
+    let first = f.first();
+    let request = f
+        .client()
+        .request_capital(&first, &(43_000 * UNIT), &f.purpose());
     assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, next], &100, &200),
-        Err(Ok(Error::InsufficientPoolBalance))
-    );
-    assert_eq!(client.get_request(&next).status, RequestStatus::Pending);
-}
-
-#[test]
-fn three_member_round_has_fifty_thousand_available_and_marks_requests() {
-    let f = Fixture::new();
-    f.contribute_n(&f.rahul, 4);
-    f.contribute_n(&f.riya, 3);
-    f.contribute_n(&f.aman, 3);
-    let client = f.client();
-    assert_eq!(client.get_pool_balance().available_pool, 50_000 * UNIT);
-    assert_eq!(client.get_pool_balance().token_balance, 50_000 * UNIT);
-    assert_eq!(client.get_community().member_count, 3);
-    let r1 = client.request_capital(&f.rahul, &(43_000 * UNIT), &f.purpose());
-    let r2 = client.request_capital(&f.riya, &(46_000 * UNIT), &f.purpose());
-    let r3 = client.request_capital(&f.aman, &(45_000 * UNIT), &f.purpose());
-    let id = client.create_round(&f.admin, &vec![&f.env, r1, r2, r3], &100, &200);
-    assert_eq!(id, 1);
-    let round = client.get_round(&id);
-    assert_eq!(round.request_ids, vec![&f.env, r1, r2, r3]);
-    assert_eq!(
-        round.participants,
-        vec![&f.env, f.rahul.clone(), f.riya.clone(), f.aman.clone()]
-    );
-    assert_eq!(round.available_capital, 50_000 * UNIT);
-    assert_eq!(round.commit_deadline, 100);
-    assert_eq!(round.reveal_deadline, 200);
-    assert_eq!(round.status, RoundStatus::Commit);
-    assert!(round.winner.is_none());
-    assert!(round.winning_bid.is_none());
-    assert!(!round.settled);
-    for request_id in [r1, r2, r3] {
-        assert_eq!(
-            client.get_request(&request_id).status,
-            RequestStatus::IncludedInRound
-        );
-    }
-    assert_eq!(client.get_community().round_counter, 1);
-}
-
-#[test]
-fn invalid_rounds_are_rejected_without_changing_requests() {
-    let f = Fixture::new();
-    f.contribute_n(&f.rahul, 5);
-    f.contribute_n(&f.riya, 3);
-    let client = f.client();
-    let first = client.request_capital(&f.rahul, &(40_000 * UNIT), &f.purpose());
-    let second = client.request_capital(&f.riya, &(40_000 * UNIT), &f.purpose());
-    assert_eq!(
-        client.try_create_round(&f.rahul, &vec![&f.env, first], &100, &200),
+        f.client()
+            .try_create_round(&first, &vec![&f.env, request], &100, &200),
         Err(Ok(Error::Unauthorized))
     );
     assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, 99], &100, &200),
+        f.client()
+            .try_create_round(&f.admin, &vec![&f.env, 99], &100, &200),
         Err(Ok(Error::RequestNotFound))
     );
     assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, first], &0, &200),
+        f.client()
+            .try_create_round(&f.admin, &vec![&f.env, request], &100, &100),
         Err(Ok(Error::InvalidDeadline))
     );
+    let token = soroban_sdk::token::TokenClient::new(&f.env, &f.asset);
+    token.transfer(&f.contract, &MuxedAddress::from(&f.admin), &CONTRIBUTION);
     assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, first], &100, &100),
-        Err(Ok(Error::InvalidDeadline))
+        f.client()
+            .try_create_round(&f.admin, &vec![&f.env, request], &100, &200),
+        Err(Ok(Error::InsufficientPoolBalance))
     );
     assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, first, first], &100, &200),
-        Err(Ok(Error::DuplicateParticipant))
+        f.client().get_request(&request).status,
+        RequestStatus::Pending
     );
-    assert_eq!(client.get_request(&first).status, RequestStatus::Pending);
-    client.create_round(&f.admin, &vec![&f.env, first], &100, &200);
-    assert_eq!(
-        client.try_create_round(&f.admin, &vec![&f.env, first, second], &100, &200),
-        Err(Ok(Error::InvalidRequestStatus))
-    );
-    assert_eq!(client.get_request(&second).status, RequestStatus::Pending);
 }
