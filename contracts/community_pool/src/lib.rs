@@ -657,6 +657,58 @@ impl CommunityPool {
         Ok(())
     }
 
+    pub fn settle(env: Env, round_id: u64, winner: Address, due_date: u64) -> Result<(), Error> {
+        let mut community = load_community(&env)?;
+        winner.require_auth();
+        let mut round = load_round(&env, round_id)?;
+        if round.status == RoundStatus::Settled || round.settled {
+            return Err(Error::AlreadySettled);
+        }
+        if round.status != RoundStatus::Finalized {
+            return Err(Error::InvalidRoundStatus);
+        }
+        if round.winner.as_ref() != Some(&winner) {
+            return Err(Error::NoWinner);
+        }
+        if due_date <= env.ledger().timestamp() {
+            return Err(Error::InvalidDeadline);
+        }
+        let amount = round.winning_bid.ok_or(Error::NoWinner)?;
+        if amount <= 0 || amount > community.available_pool {
+            return Err(Error::InsufficientPoolBalance);
+        }
+        let token = TokenClient::new(&env, &community.asset);
+        if token.balance(&env.current_contract_address()) < amount {
+            return Err(Error::InsufficientPoolBalance);
+        }
+        let mut member = load_member(&env, &winner).ok_or(Error::MemberNotFound)?;
+        if !member.active || member.unresolved_default || member.outstanding_financing != 0 {
+            return Err(Error::NotEligible);
+        }
+        let mut request = request_for_participant(&env, &round, &winner)?;
+        if request.status != RequestStatus::IncludedInRound {
+            return Err(Error::InvalidRequestStatus);
+        }
+        let available = community
+            .available_pool
+            .checked_sub(amount)
+            .ok_or(Error::Overflow)?;
+        let destination = MuxedAddress::from(&winner);
+        token.transfer(&env.current_contract_address(), &destination, &amount);
+        community.available_pool = available;
+        member.outstanding_financing = amount;
+        request.status = RequestStatus::Funded;
+        round.outstanding_amount = amount;
+        round.due_date = Some(due_date);
+        round.settled = true;
+        round.status = RoundStatus::Settled;
+        save_member(&env, &winner, &member);
+        save_request(&env, &request);
+        save_round(&env, &round);
+        save_community(&env, &community);
+        Ok(())
+    }
+
     pub fn get_commitment(
         env: Env,
         round_id: u64,
