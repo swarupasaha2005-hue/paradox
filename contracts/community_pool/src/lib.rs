@@ -125,6 +125,47 @@ pub struct CycleMember {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FinancialHistory {
+    pub member: Address,
+    pub contributions_completed: u32,
+    pub total_contributed: i128,
+    pub cycles_joined: u32,
+    pub cycles_completed: u32,
+    pub cycle_ids: Vec<u64>,
+    pub payouts_received: u32,
+    pub total_payouts_received: i128,
+    pub post_payout_contributions: u32,
+    pub discounts_earned: i128,
+    pub discounts_claimed: i128,
+    pub current_cycle_id: Option<u64>,
+    pub current_cycle_payout_received: bool,
+    pub current_cycle_expected: u32,
+    pub current_cycle_completed: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CycleFinancialHistory {
+    pub cycle_id: u64,
+    pub member: Address,
+    pub cycle_complete: bool,
+    pub expected_contributions: u32,
+    pub completed_contributions: u32,
+    pub contributions_before_payout: u32,
+    pub contributions_after_payout: u32,
+    pub post_payout_expected_to_date: u32,
+    pub post_payout_required_total: u32,
+    pub payout_received: bool,
+    pub payout_amount: i128,
+    pub payout_round_number: Option<u32>,
+    pub discounts_earned: i128,
+    pub discounts_claimed: i128,
+    pub claimable_discount: i128,
+    pub obligation_complete: bool,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EligibilityResult {
     pub eligible: bool,
     pub is_member: bool,
@@ -989,7 +1030,7 @@ impl CommunityPool {
         if winner_state.payout_received {
             return Err(Error::AlreadyPaidOut);
         }
-        let mut member = load_member(&env, &winner).ok_or(Error::MemberNotFound)?;
+        let member = load_member(&env, &winner).ok_or(Error::MemberNotFound)?;
         if !member.active || member.unresolved_default {
             return Err(Error::NotEligible);
         }
@@ -1019,6 +1060,7 @@ impl CommunityPool {
         for address in cycle.members.iter() {
             let mut state =
                 load_cycle_member(&env, cycle.id, &address).ok_or(Error::NotCycleMember)?;
+            let mut history = load_member(&env, &address).ok_or(Error::MemberNotFound)?;
             let mut rank = 0u32;
             for other in cycle.members.iter() {
                 if other.to_string() < address.to_string() {
@@ -1026,16 +1068,37 @@ impl CommunityPool {
                 }
             }
             let extra = if rank < remainder { 1 } else { 0 };
+            let credit = equal_share + extra;
             state.claimable_discount = state
                 .claimable_discount
-                .checked_add(equal_share + extra)
+                .checked_add(credit)
+                .ok_or(Error::Overflow)?;
+            history.discounts_earned = history
+                .discounts_earned
+                .checked_add(credit)
                 .ok_or(Error::Overflow)?;
             if address == winner {
                 state.payout_received = true;
+                state.payout_amount = amount;
+                state.payout_round_number = Some(cycle.current_round_number);
+                history.payouts_received = history
+                    .payouts_received
+                    .checked_add(1)
+                    .ok_or(Error::Overflow)?;
+                history.total_payouts_received = history
+                    .total_payouts_received
+                    .checked_add(amount)
+                    .ok_or(Error::Overflow)?;
             }
             if cycle_complete {
                 state.obligation_complete =
                     state.completed_contributions == state.expected_contributions;
+                if state.obligation_complete {
+                    history.cycles_completed = history
+                        .cycles_completed
+                        .checked_add(1)
+                        .ok_or(Error::Overflow)?;
+                }
             } else {
                 state.expected_contributions = state
                     .expected_contributions
@@ -1043,15 +1106,8 @@ impl CommunityPool {
                     .ok_or(Error::Overflow)?;
             }
             save_cycle_member(&env, &state);
+            save_member(&env, &address, &history);
         }
-        member.payouts_received = member
-            .payouts_received
-            .checked_add(1)
-            .ok_or(Error::Overflow)?;
-        member.total_payouts_received = member
-            .total_payouts_received
-            .checked_add(amount)
-            .ok_or(Error::Overflow)?;
         community.reserved_pool = community
             .reserved_pool
             .checked_sub(round.pot)
@@ -1088,7 +1144,6 @@ impl CommunityPool {
             &MuxedAddress::from(&winner),
             &amount,
         );
-        save_member(&env, &winner, &member);
         save_cycle(&env, &cycle);
         save_round(&env, &round);
         save_community(&env, &community);
@@ -1113,6 +1168,10 @@ impl CommunityPool {
             .discounts_claimed
             .checked_add(amount)
             .ok_or(Error::Overflow)?;
+        let cycle_claimed = state
+            .discounts_claimed
+            .checked_add(amount)
+            .ok_or(Error::Overflow)?;
         let next_liability = community
             .discount_liability
             .checked_sub(amount)
@@ -1123,6 +1182,7 @@ impl CommunityPool {
             &amount,
         );
         state.claimable_discount = 0;
+        state.discounts_claimed = cycle_claimed;
         history.discounts_claimed = next_claimed;
         community.discount_liability = next_liability;
         save_cycle_member(&env, &state);
@@ -1177,6 +1237,37 @@ impl CommunityPool {
         load_member(&env, &address).ok_or(Error::MemberNotFound)
     }
 
+    pub fn get_financial_history(env: Env, address: Address) -> Result<FinancialHistory, Error> {
+        let community = load_community(&env)?;
+        let member = load_member(&env, &address).ok_or(Error::MemberNotFound)?;
+        let cycle_state = community
+            .current_cycle_id
+            .and_then(|id| load_cycle_member(&env, id, &address));
+        Ok(FinancialHistory {
+            member: address,
+            contributions_completed: member.contributions_completed,
+            total_contributed: member.total_contributed,
+            cycles_joined: member.cycles_joined,
+            cycles_completed: member.cycles_completed,
+            cycle_ids: member.cycle_ids,
+            payouts_received: member.payouts_received,
+            total_payouts_received: member.total_payouts_received,
+            post_payout_contributions: member.post_payout_contributions,
+            discounts_earned: member.discounts_earned,
+            discounts_claimed: member.discounts_claimed,
+            current_cycle_id: cycle_state.as_ref().map(|state| state.cycle_id),
+            current_cycle_payout_received: cycle_state
+                .as_ref()
+                .is_some_and(|state| state.payout_received),
+            current_cycle_expected: cycle_state
+                .as_ref()
+                .map_or(0, |state| state.expected_contributions),
+            current_cycle_completed: cycle_state
+                .as_ref()
+                .map_or(0, |state| state.completed_contributions),
+        })
+    }
+
     pub fn is_member(env: Env, address: Address) -> Result<bool, Error> {
         load_community(&env)?;
         Ok(load_member(&env, &address).is_some())
@@ -1217,6 +1308,44 @@ impl CommunityPool {
         load_community(&env)?;
         load_cycle(&env, cycle_id)?;
         load_cycle_member(&env, cycle_id, &member).ok_or(Error::NotCycleMember)
+    }
+
+    pub fn get_cycle_history(
+        env: Env,
+        cycle_id: u64,
+        member: Address,
+    ) -> Result<CycleFinancialHistory, Error> {
+        load_community(&env)?;
+        let cycle = load_cycle(&env, cycle_id)?;
+        let state = load_cycle_member(&env, cycle_id, &member).ok_or(Error::NotCycleMember)?;
+        let post_payout_expected_to_date = state.payout_round_number.map_or(0, |round| {
+            state.expected_contributions.saturating_sub(round)
+        });
+        let post_payout_required_total = state
+            .payout_round_number
+            .map_or(0, |round| cycle.members.len().saturating_sub(round));
+        let discounts_earned = state
+            .claimable_discount
+            .checked_add(state.discounts_claimed)
+            .ok_or(Error::Overflow)?;
+        Ok(CycleFinancialHistory {
+            cycle_id,
+            member,
+            cycle_complete: cycle.complete,
+            expected_contributions: state.expected_contributions,
+            completed_contributions: state.completed_contributions,
+            contributions_before_payout: state.contributions_before_payout,
+            contributions_after_payout: state.contributions_after_payout,
+            post_payout_expected_to_date,
+            post_payout_required_total,
+            payout_received: state.payout_received,
+            payout_amount: state.payout_amount,
+            payout_round_number: state.payout_round_number,
+            discounts_earned,
+            discounts_claimed: state.discounts_claimed,
+            claimable_discount: state.claimable_discount,
+            obligation_complete: state.obligation_complete,
+        })
     }
 
     pub fn get_request(env: Env, request_id: u64) -> Result<CapitalRequest, Error> {
