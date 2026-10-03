@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+coverage/
+*.tsbuildinfo
+target/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+.stellar/
+.soroban/
+apps/web/next-env.d.ts

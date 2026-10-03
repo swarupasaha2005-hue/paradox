@@ -1,0 +1,12 @@
+[package]
+name = "community_pool"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.91"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
