@@ -5,8 +5,7 @@ use soroban_sdk::{
     Address, BytesN, Env, MuxedAddress, Vec,
 };
 
-// Step 3 will call the hash during reveal. It must not be exposed before reveal.
-#[allow(dead_code)]
+// Hash inputs stay private until reveal; the preimage is never stored.
 mod commitment;
 
 const MAX_ROUND_REQUESTS: u32 = 10;
@@ -32,6 +31,20 @@ pub enum Error {
     Overflow = 15,
     InvalidRoundSize = 16,
     DuplicateParticipant = 17,
+    NotParticipant = 18,
+    InvalidRoundStatus = 19,
+    CommitClosed = 20,
+    RevealNotOpen = 21,
+    RevealClosed = 22,
+    CommitmentAlreadyExists = 23,
+    CommitmentNotFound = 24,
+    CommitmentMismatch = 25,
+    RevealAlreadyExists = 26,
+    InvalidBid = 27,
+    FinalizationTooEarly = 28,
+    NoWinner = 29,
+    AlreadySettled = 30,
+    InvalidRepayment = 31,
 }
 
 #[contracttype]
@@ -121,6 +134,9 @@ pub struct Round {
     pub winner: Option<Address>,
     pub winning_bid: Option<i128>,
     pub settled: bool,
+    pub valid_reveal_count: u32,
+    pub outstanding_amount: i128,
+    pub due_date: Option<u64>,
 }
 
 #[contracttype]
@@ -136,6 +152,8 @@ enum DataKey {
     Member(Address),
     Request(u64),
     Round(u64),
+    Commitment(u64, Address),
+    Reveal(u64, Address),
 }
 
 #[contractevent]
@@ -214,6 +232,33 @@ fn save_request(env: &Env, request: &CapitalRequest) {
     let key = DataKey::Request(request.id);
     env.storage().persistent().set(&key, request);
     bump_persistent(env, &key);
+}
+
+fn load_round(env: &Env, id: u64) -> Result<Round, Error> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Round(id))
+        .ok_or(Error::RoundNotFound)
+}
+
+fn save_round(env: &Env, round: &Round) {
+    let key = DataKey::Round(round.id);
+    env.storage().persistent().set(&key, round);
+    bump_persistent(env, &key);
+}
+
+fn request_for_participant(
+    env: &Env,
+    round: &Round,
+    participant: &Address,
+) -> Result<CapitalRequest, Error> {
+    for request_id in round.request_ids.iter() {
+        let request = load_request(env, request_id)?;
+        if request.member == *participant {
+            return Ok(request);
+        }
+    }
+    Err(Error::NotParticipant)
 }
 
 fn eligibility(community: &Community, member: Option<&Member>, amount: i128) -> EligibilityResult {
@@ -462,10 +507,11 @@ impl CommunityPool {
             winner: None,
             winning_bid: None,
             settled: false,
+            valid_reveal_count: 0,
+            outstanding_amount: 0,
+            due_date: None,
         };
-        let key = DataKey::Round(id);
-        env.storage().persistent().set(&key, &round);
-        bump_persistent(&env, &key);
+        save_round(&env, &round);
         community.round_counter = id;
         save_community(&env, &community);
         RoundCreated { round_id: id }.publish(&env);
@@ -512,10 +558,7 @@ impl CommunityPool {
 
     pub fn get_round(env: Env, round_id: u64) -> Result<Round, Error> {
         load_community(&env)?;
-        env.storage()
-            .persistent()
-            .get(&DataKey::Round(round_id))
-            .ok_or(Error::RoundNotFound)
+        load_round(&env, round_id)
     }
 }
 
